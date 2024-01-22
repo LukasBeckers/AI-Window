@@ -6,32 +6,57 @@ import time
 
 
 class faceDetection():
+    """
+    Callable class that detects faces in images.
+    In this case the point between the eyes is used as the point location of the face.
+
+    This can be done because cvzone detects FaceMeshes including eyes.
+    """
     def __init__(self):
         self.detector = FaceMeshDetector(maxFaces=1, staticMode=True)
 
-    def detect_face(self, img):
-        img, faces = self.detector(img)
+    def __call__(self, img):
+        img, faces = self.detector.findFaceMesh(img, draw=False)
+        # face landmarks 145 and 374 should be the right and the left eye. The position between these points is
+        # calculated directly
+        faces = [[(np.array(face[145]) + np.array(face[374]))/2] for face in faces]
         return faces
 
+
+class faceHandeler():
+    """
+    Callable class, that handles which face from a list of face landmarks should be focussed on.
+    This could be important if multiple faces are detected.
+
+    Currently, this is just a placeholder, and it will just return the first face in the list
+    """
+    def __init__(self):
+        pass
+
+    def __call__(self, faces):
+        """
+
+        :param faces: List of lists of face landmarks
+        :return:      list of face landmarks for a single face
+        """
+        if len(faces) == 0:
+            return faces
+        faces = faces[0]
+        return faces
+
+
 class faceTriangulation():
-    def __init__(self, face_detection=faceDetection()):
-        """
 
-        :param face_detection: Callable object that localizes and calculates the distance of the face to the main camera
-
-        """
-        self.face_detection = face_detection
-
-    def calibrate(self, stream_1, stream_2, name:str='unknown'):
+    def calibrate(self, name: str = 'unknown'):
         """
         Calibrates the cameras for stereovision via several chess-board images.
         The calibration function should be automated in the future by automatic chess-board detection
 
-        :param stream_1: cv2.cap video stream of first camera
-        :param stream_2: cv2.cap video stream of second camera
         :param name:     name of this setup (calibration parameters will be saved using this name)
         :return:         Calibration matrix?
         """
+        stream_1 = self.cap1
+        stream_2 = self.cap2
         successes = 0
         while True:
 
@@ -139,7 +164,7 @@ class faceTriangulation():
                                                          cv2.CV_16SC2)
 
                 print("Saving parameters!")
-                cv_file = cv2.FileStorage('stereoMap.xml', cv2.FILE_STORAGE_WRITE)
+                cv_file = cv2.FileStorage(f'{name}_stereoMap.xml', cv2.FILE_STORAGE_WRITE)
                 cv_file.write('stereoMap1_x', stereoMap1[0])
                 cv_file.write('stereoMap1_y', stereoMap1[1])
                 cv_file.write('stereoMap2_x', stereoMap2[0])
@@ -147,9 +172,6 @@ class faceTriangulation():
 
                 cv_file.release()
                 break
-
-
-
 
 
     def triangulate_face(self, img):
@@ -188,7 +210,13 @@ class spatialFacePosition(faceTriangulation):
 
 
     """
-    def __init__(self, monitor_center: list, monitor_normal: list, monitor_rotation: list):
+    def __init__(self, monitor_center: list,
+                 monitor_normal: list,
+                 monitor_rotation: list,
+                 face_detection=faceDetection(),
+                 cap1 = cv2.VideoCapture(0,  cv2.CAP_DSHOW),
+                 cap2 = cv2.VideoCapture(1, cv2.CAP_DSHOW),
+                 handle_faces = faceHandeler()):
         """
         Aside from attributing the monitor center vector and the monitor normal vector to the class instance, also
         the
@@ -196,23 +224,55 @@ class spatialFacePosition(faceTriangulation):
         :param monitor_center:        [list] Vector pointing from the "main"-camera towards the monitor center. This
                                       vector is based on the main-cameras coordinate system.
         :param monitor_normal:        [list] Plane-normal of the monitor, based on the "main"-cameras coordinate system.
-                                      This vector is base on the main-cameras coordinate system.
+                                      This vector is based on the main-cameras coordinate system.
                                       It will also function as the x-axis in the screen coordinate system.
         :param monitor_rotation:      [list] Vector that is parallel to the lower edge of the screen. It is also based
                                       on the main-cameras coordinate system and will function as the z-coordinate in
                                       the screen coordinate system.
+        :param face_detection:        [callable Object] Function or callable class that takes in an image and returns
+                                      the coordinates of the face or position between the eyes.
+        :param cap1 u. cap2:          cv2 video-streams from both cameras.
                                        
         """
         super().__init__()
+        self.face_detection = face_detection
+        self.cap1 = cap1
+        self.cap2 = cap2
+        self.handle_faces = handle_faces
+
         self.monitor_center = monitor_center
         self.monitor_normal = monitor_normal
         self.monitor_rotation = monitor_rotation
 
         y = np.cross(self.monitor_rotation, self.monitor_normal)
-        print(y)
 
-    def main(self):
-        pass
+        # Axes of the screen coordinate system.
+        self.new_x = normalize(monitor_normal)
+        self.new_y = normalize(y)
+        self.new_z = normalize(monitor_rotation)
+
+    def __call__(self):
+        """
+        Reads both streams, loads just one frame and predicts the spatial position of the head in relation to the
+        screen.
+
+        :return:    Success face_pos img1 (with face annotations) img2 (with face annotations)
+        """
+
+        sucess1, img1 = self.cap1.read()
+        sucess2, img2 = self.cap2.read()
+
+        if not sucess2 or not sucess1:
+            print('Could not read both Cams')
+            return False
+
+        faces1 = self.face_detection(img1)
+        faces2 = self.face_detection(img2)
+        face1 = self.handle_faces(faces1)
+        face2 = self.handle_faces(faces2)
+        print(face2)
+        print(len(face2))
+        return face1, face2, img1, img2
 
 
 
@@ -223,21 +283,39 @@ def mouse_callback(event, x, y, flags, param):
         cv2.imwrite('captured_image.jpg', img1)
         print("Image captured and saved as 'captured_image.jpg'")
 
-detector = FaceMeshDetector(maxFaces=1, staticMode=True)
+
+def normalize(vector):
+    """
+    Normalizes a vector to an unit vector
+    """
+    norm = np.linalg.norm(vector)
+    if norm == 0:
+        return vector
+    else:
+        return vector/norm
 
 
 if __name__ == "__main__":
 
-    cap1 = cv2.VideoCapture(0,  cv2.CAP_DSHOW)
-    cap2 = cv2.VideoCapture(1,  cv2.CAP_DSHOW)
-    #cap1.set(cv2.CAP_PROP_FRAME_WIDTH, 960)
-    #cap1.set(cv2.CAP_PROP_FRAME_HEIGHT, 540)
-    #cap2.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    #cap2.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
     faceposition = spatialFacePosition([0, 0, 0], [1, 0, 0], [0, 0, 1])
-    faceposition.calibrate(cap1, cap2)
-    print('finished calibration')
+
+    for i in range(10000):
+        face1, face2, img1, img2 = faceposition()
+        try:
+            cv2.circle(img1, face1[0].astype(np.int32), 5, (255, 0, 255), cv2.FILLED)
+        except Exception:
+            pass
+        try:
+            cv2.circle(img2, face2[0].astype(np.int32), 5, (255, 0, 255), cv2.FILLED)
+        except Exception:
+            pass
+
+        cv2.imshow(f'Image 1', img1)
+        cv2.imshow(f'Image 2', img2)
+        cv2.waitKey(1)
+
+    #faceposition.calibrate()
 
     #calibrate_stereo_camera(cap1, cap2)
     #cv2.namedWindow('Webcam')
