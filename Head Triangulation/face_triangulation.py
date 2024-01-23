@@ -164,7 +164,7 @@ class faceTriangulation():
                                                          cv2.CV_16SC2)
 
                 print("Saving parameters!")
-                cv_file = cv2.FileStorage(f'{name}_stereoMap.xml', cv2.FILE_STORAGE_WRITE)
+                cv_file = cv2.FileStorage(f'{name}stereoMap.xml', cv2.FILE_STORAGE_WRITE)
                 cv_file.write('stereoMap1_x', stereoMap1[0])
                 cv_file.write('stereoMap1_y', stereoMap1[1])
                 cv_file.write('stereoMap2_x', stereoMap2[0])
@@ -174,9 +174,34 @@ class faceTriangulation():
                 break
 
 
-    def triangulate_face(self, img):
-        faces = self.face_detection(img)
-        return faces
+
+    def triangulate_face(self, img1, img2):
+        """
+
+        :param img1 & img2:  Rectified images from both cameras
+        :return:
+        """
+        faces1 = self.face_detection(img1)
+        faces2 = self.face_detection(img2)
+        # face = center point of face
+        face1 = self.handle_faces(faces1)
+        face2 = self.handle_faces(faces2)
+        if len(face2) == 0 or len(face1) == 0:
+            # one camera could not detect the face
+            return face1, face2
+        ##### Calculating Depth ######
+        h1, w1, c1 = img1.shape
+        h2, w2, c2 = img2.shape
+
+        if w1 == w2:
+            f_pixel = (w1*0.5) / np.tan(self.alpha * 0.5 * np.pi/180)
+        else:
+            print('Left and right camera do not have the same resolution! Fix in a preprocessing step!')
+
+        x1 = face1[0]
+        x2 = face2[0]
+
+        return face1, face2
 
 
 class spatialFacePosition(faceTriangulation):
@@ -216,7 +241,12 @@ class spatialFacePosition(faceTriangulation):
                  face_detection=faceDetection(),
                  cap1 = cv2.VideoCapture(0,  cv2.CAP_DSHOW),
                  cap2 = cv2.VideoCapture(1, cv2.CAP_DSHOW),
-                 handle_faces = faceHandeler()):
+                 handle_faces = faceHandeler(),
+                 frame_rate = 30,
+                 B = 11.5,
+                 f = 3.8,
+                 alpha = 120,
+                 name = ''):
         """
         Aside from attributing the monitor center vector and the monitor normal vector to the class instance, also
         the
@@ -232,6 +262,13 @@ class spatialFacePosition(faceTriangulation):
         :param face_detection:        [callable Object] Function or callable class that takes in an image and returns
                                       the coordinates of the face or position between the eyes.
         :param cap1 u. cap2:          cv2 video-streams from both cameras.
+        :param handle_faces:          Callable object that chooses the right face from the detected list of faces.
+        :param frame_rate:            Frame rate of both cameras.
+        :param B:                     Distance between both cameras [cm].
+        :param f:                     Focal length of the cameras [mm].
+        :param alpha:                 Horizontal field of view [degrees].
+        :param name:                  Name of this configuration.
+
                                        
         """
         super().__init__()
@@ -239,6 +276,11 @@ class spatialFacePosition(faceTriangulation):
         self.cap1 = cap1
         self.cap2 = cap2
         self.handle_faces = handle_faces
+        self.frame_rate = frame_rate
+        self.B = B
+        self.f = f
+        self.alpha = alpha
+        self.name = name
 
         self.monitor_center = monitor_center
         self.monitor_normal = monitor_normal
@@ -250,6 +292,22 @@ class spatialFacePosition(faceTriangulation):
         self.new_x = normalize(monitor_normal)
         self.new_y = normalize(y)
         self.new_z = normalize(monitor_rotation)
+
+        ######################## Loading Initial Camera Calibration ##########################
+        try:
+            cv_file = cv2.FileStorage()
+            cv_file.open(f'{self.name}stereoMap.xml', cv2.FileStorage_READ)
+        except FileNotFoundError:
+            # Calibrating to generate a stereMap named {name}stereoMap.xml
+            self.calibrate(self.name)
+            cv_file = cv2.FileStorage()
+            cv_file.open(f'{self.name}stereoMap.xml', cv2.FileStorage_READ)
+
+        self.stereoMap1_x = cv_file.getNode('stereoMap1_x').mat()
+        self.stereoMap1_y = cv_file.getNode('stereoMap1_y').mat()
+        self.stereoMap2_x = cv_file.getNode('stereoMap2_x').mat()
+        self.stereoMap2_y = cv_file.getNode('stereoMap2_y').mat()
+
 
     def __call__(self):
         """
@@ -266,12 +324,14 @@ class spatialFacePosition(faceTriangulation):
             print('Could not read both Cams')
             return False
 
-        faces1 = self.face_detection(img1)
-        faces2 = self.face_detection(img2)
-        face1 = self.handle_faces(faces1)
-        face2 = self.handle_faces(faces2)
-        print(face2)
-        print(len(face2))
+        ##### Frame Rectification #####
+        # Undisort and rectify images using the stereoMap generated during calibration
+
+        img1 = cv2.remap(img1, self.stereoMap1_x, self.stereoMap1_y, cv2.INTER_LANCZOS4)
+        img2 = cv2.remap(img2, self.stereoMap2_x, self.stereoMap2_y, cv2.INTER_LANCZOS4)
+
+        face1, face2 = self.triangulate_face(img1, img2)
+
         return face1, face2, img1, img2
 
 
