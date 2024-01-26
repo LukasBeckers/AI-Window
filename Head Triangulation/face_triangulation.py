@@ -3,6 +3,7 @@ from cvzone.FaceMeshModule import FaceMeshDetector
 from multiprocessing import get_context, TimeoutError
 import numpy as np
 import time
+import os
 
 
 class faceDetection():
@@ -19,7 +20,7 @@ class faceDetection():
         img, faces = self.detector.findFaceMesh(img, draw=False)
         # face landmarks 145 and 374 should be the right and the left eye. The position between these points is
         # calculated directly
-        faces = [[(np.array(face[145]) + np.array(face[374]))/2] for face in faces]
+        faces = [(np.array(face[145]) + np.array(face[374]))/2 for face in faces]
         return faces
 
 
@@ -39,6 +40,7 @@ class faceHandeler():
         :param faces: List of lists of face landmarks
         :return:      list of face landmarks for a single face
         """
+
         if len(faces) == 0:
             return faces
         faces = faces[0]
@@ -65,7 +67,6 @@ class faceTriangulation():
 
             cv2.imshow('Image1', image1)
             cv2.imshow('Image2', image2)
-
             k = cv2.waitKey(50)
 
             chessboard_size = (6, 4)
@@ -99,7 +100,6 @@ class faceTriangulation():
                 success1, corners1 = cv2.findChessboardCorners(gray1, chessboard_size, flags=cv2.CALIB_USE_INTRINSIC_GUESS)
                 success2, corners2 = cv2.findChessboardCorners(gray2, chessboard_size, flags=cv2.CALIB_USE_INTRINSIC_GUESS)
                 print(success1, success2)
-
                 if success1 and success2:
                     successes += 1
 
@@ -170,14 +170,17 @@ class faceTriangulation():
                 cv_file.write('stereoMap2_x', stereoMap2[0])
                 cv_file.write('stereoMap2_y', stereoMap2[1])
 
+                self.stereoMap1_x = stereoMap1[0]
+                self.stereoMap1_y = stereoMap1[1]
+                self.stereoMap2_x = stereoMap2[0]
+                self.stereoMap2_y = stereoMap2[1] 
+
                 cv_file.release()
                 break
 
 
-
     def triangulate_face(self, img1, img2):
         """
-
         :param img1 & img2:  Rectified images from both cameras
         :return:
         """
@@ -194,13 +197,16 @@ class faceTriangulation():
         h2, w2, c2 = img2.shape
 
         if w1 == w2:
-            f_pixel = (w1*0.5) / np.tan(self.alpha * 0.5 * np.pi/180)
+            f_pixel = (w2*0.5) / np.tan(self.alpha * 0.5 * np.pi/180)
         else:
             print('Left and right camera do not have the same resolution! Fix in a preprocessing step!')
 
         x1 = face1[0]
         x2 = face2[0]
-
+        disparity = x2 - x1
+        print(f'f_pixel {f_pixel}, disparity {disparity}, w1 {w1}, w2 {w2}, B {self.B}, alpha {self.alpha}')
+        depth = (self.B * f_pixel)/disparity
+        self.current_depth = depth
         return face1, face2
 
 
@@ -281,24 +287,25 @@ class spatialFacePosition(faceTriangulation):
         self.f = f
         self.alpha = alpha
         self.name = name
+        self.current_depth = 9999
 
         self.monitor_center = monitor_center
         self.monitor_normal = monitor_normal
         self.monitor_rotation = monitor_rotation
-
         y = np.cross(self.monitor_rotation, self.monitor_normal)
-
         # Axes of the screen coordinate system.
         self.new_x = normalize(monitor_normal)
         self.new_y = normalize(y)
         self.new_z = normalize(monitor_rotation)
 
         ######################## Loading Initial Camera Calibration ##########################
-        try:
+        if os.path.isfile(f'{self.name}stereoMap.xml'):
             cv_file = cv2.FileStorage()
             cv_file.open(f'{self.name}stereoMap.xml', cv2.FileStorage_READ)
-        except FileNotFoundError:
+            print('Loaded the Stereo map')
+        else:
             # Calibrating to generate a stereMap named {name}stereoMap.xml
+            print('Calibrating')
             self.calibrate(self.name)
             cv_file = cv2.FileStorage()
             cv_file.open(f'{self.name}stereoMap.xml', cv2.FileStorage_READ)
@@ -329,11 +336,9 @@ class spatialFacePosition(faceTriangulation):
 
         img1 = cv2.remap(img1, self.stereoMap1_x, self.stereoMap1_y, cv2.INTER_LANCZOS4)
         img2 = cv2.remap(img2, self.stereoMap2_x, self.stereoMap2_y, cv2.INTER_LANCZOS4)
-
         face1, face2 = self.triangulate_face(img1, img2)
 
-        return face1, face2, img1, img2
-
+        return self.current_depth, face1, face2, img1, img2
 
 
 # Function to handle mouse events
@@ -357,56 +362,32 @@ def normalize(vector):
 
 if __name__ == "__main__":
 
-
     faceposition = spatialFacePosition([0, 0, 0], [1, 0, 0], [0, 0, 1])
-
+    faceposition.calibrate()
     for i in range(10000):
-        face1, face2, img1, img2 = faceposition()
+        depth, face1, face2, img1, img2 = faceposition()
+
         try:
-            cv2.circle(img1, face1[0].astype(np.int32), 5, (255, 0, 255), cv2.FILLED)
+            cv2.circle(img1, face1.astype(np.int32), 5, (255, 0, 255), cv2.FILLED)
         except Exception:
             pass
         try:
-            cv2.circle(img2, face2[0].astype(np.int32), 5, (255, 0, 255), cv2.FILLED)
+            cv2.circle(img2, face2.astype(np.int32), 5, (255, 0, 255), cv2.FILLED)
         except Exception:
             pass
 
-        cv2.imshow(f'Image 1', img1)
+        try:
+
+            cv2.putText(img1, f'{depth} cm', tuple(face1.astype(np.int32) + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 255, 0), 1)
+            cv2.putText(img2, f'{depth} cm', tuple(face2.astype(np.int32) + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (0, 255, 0), 1)
+        except Exception:
+            pass
+        cv2.imshow('Image 1', img1)
         cv2.imshow(f'Image 2', img2)
-        cv2.waitKey(1)
+        key = cv2.waitKey(1)
+        if key > 0:
+            break
 
-    #faceposition.calibrate()
 
-    #calibrate_stereo_camera(cap1, cap2)
-    #cv2.namedWindow('Webcam')
-    #cv2.setMouseCallback('Webcam', mouse_callback)
-    #sucess1, img1old = cap1.read()
-    #sucess2, img2old = cap2.read()
-    #img2old = np.array(img2old, dtype=np.float64)
-    #previous_images = [img2old]
-    #set_back = 20
-    #while cap1.isOpened():
-    #    sucess1, img1 = cap1.read()
-    #    sucess2, img2 = cap2.read()
-    #    img2copy = np.array(img2, dtype=np.float64)
-
-    #    img2 = np.array(img2, dtype=np.float64)
-    #    img2 = img2 - 20 - img2old
-#
-    #    img2[img2 < 0] = 0
-
-        #img2 = cv2.imread("captured_image.jpg")
-        #img2 = cv2.resize(img2, [1920, 1080])
-        ####
-        #img1old += img1
-     #   img2old = img2copy
-
-     #   cv2.imshow('Webcam', img2.astype(np.uint8))
-     #   k = cv2.waitKey(1)
-     #   if not k == -1: break
-        #img1, faces1 = detector.findFaceMesh(img1, draw=True)
-        #img2, faces1 = detector.findFaceMesh(img2, draw=True)
-        #cv2.imshow('Camera 1', img1)
-        #cv2.imshow('Camera 2', img2)
-
-        #cv2.waitKey(1)
