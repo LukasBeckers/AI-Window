@@ -1,0 +1,20 @@
+Plan for epipolar triangulation:
+
+@ Should be easily doable in open-cv
+1. Camera Calibration:
+    - find intrinsic camera-matrix
+        - is it scalabel, because open-cv returns really large values?   Seems so!
+
+
+@ Look at drone code, maybe you will understand it.
+2. Calibrate Uncalibrated Stereo System.
+    - find essential matrix (relative position and rotation of one camera in relation to the other)
+        - essential matrix = translation x rotation matrix.
+        - generate at least 8 face detection pairs for this calibration
+
+    - optimize result using gradient descent?
+
+@ Look at drone code, maybe you will understand it.
+3. Triangulate Face using epipolar geometry.
+
+! Synchronize Cameras
