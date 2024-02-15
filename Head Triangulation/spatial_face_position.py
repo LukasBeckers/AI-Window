@@ -5,7 +5,11 @@ import numpy as np
 import time
 import os
 import json
+from scipy import linalg
 from camera import Camera
+from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.pyplot as plt
+
 
 
 class faceDetection():
@@ -25,19 +29,31 @@ class faceDetection():
         faces = [(np.array(face[145]) + np.array(face[374]))/2 for face in faces]
         return faces
 
-    def calibrate_cameras(self, rows, columns, n_images=5, scaling=1):
-        """
-        This method calibrates the cameras of the faceDetection one by one.
-        This is it calculates the internal camera matrix based on a list of images shot by the camera of a chess board.
-        Soo keep an image of a chessboard ready!
+class checkerboardDetection():
+    """
+    Callable class that detects all checkerboard corners in an image, containing a 5x7 checkerboard
 
-        :param rows:        Number of rows in the chessboard/checkerboard
-        :param columns:     Number of column in the checkerboard
-        :param n_images:    Number of images that should be taken for calibration.
-        :param scaling:     Size of a checkerboard square in real world (this will calibrate the cameras coordinate
-                            system to real world units of your liking)
-        :return:
-        """
+    This class is meant for debugging purposes, because the checkerboard-corner localization is much more precise than
+    the facedetection.
+    """
+    def __init__(self):
+        pass
+
+
+    def __call__(self, img):
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.0001)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+
+        # Detecting the checkerboard corners
+        corner_success, corners = cv2.findChessboardCorners(gray, (4, 6), None)
+        if corner_success:
+            # Refining the detection
+            corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
+        else:
+            corners = [[[]]]
+        # unpacking the inner lists
+        corners = [c[0] for c in corners]
+        return corners
 
 
 class faceHandeler():
@@ -75,7 +91,6 @@ class faceTriangulation():
         rows -= 1
         columns -= 1
 
-        # change this if stereo calibration not good.
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.0001)
 
         # coordinates of squares in the checkerboard world space
@@ -100,6 +115,10 @@ class faceTriangulation():
             success1, img1 = self.cameras[0].read()
             success2, img2 = self.cameras[1].read()
 
+            # counting the number of successful detections
+            cv2.putText(img1, f'{len(imgpoints_1)}', (10, 10), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 255), 1)
+            cv2.putText(img2, f'{len(imgpoints_2)}', (10, 10), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 255), 1)
+
             if success1 and success2:
                 # Displaying the images
                 cv2.imshow(f"{self.cameras[0]}", img1)
@@ -110,6 +129,7 @@ class faceTriangulation():
                     return
                 # press any key except esc to take the frame for calibration
                 if key > 0:
+
                     gray1 = cv2.cvtColor(img1, cv2.COLOR_BGRA2GRAY)
                     gray2 = cv2.cvtColor(img2, cv2.COLOR_BGRA2GRAY)
 
@@ -125,11 +145,23 @@ class faceTriangulation():
                         # Showing the detection
                         cv2.drawChessboardCorners(img1, (rows, columns), corners1, corner_success1)
                         cv2.drawChessboardCorners(img2, (rows, columns), corners2, corner_success2)
+                        for i, [corner] in enumerate(corners1):
+                            cv2.putText(img1, f'{i}', (int(corner[0]), int(corner[1])), cv2.FONT_HERSHEY_COMPLEX, 1,
+                                        (0, 0, 255), 1)
+                        for i, [corner] in enumerate(corners2):
+                            cv2.putText(img2, f'{i}', (int(corner[0]), int(corner[1])), cv2.FONT_HERSHEY_COMPLEX, 1,
+                                        (0, 0, 255), 1)
                         cv2.imshow(f'Detection {self.cameras[0]}', img1)
                         cv2.imshow(f'Detection {self.cameras[1]}', img2)
                         key = cv2.waitKey(0)
-                        # press any key to continue
-                        if key > 0:
+                        if key & 0xFF == ord('s'): # skipping if s is pressed
+                            print('skipping')
+                            cv2.destroyWindow(f'Detection {self.cameras[0]}')
+                            cv2.destroyWindow(f'Detection {self.cameras[1]}')
+                            continue
+
+                        # press any other key (except esc) to use the detection
+                        elif key > 0:
                             # storing the realworld/ image-space coordinate pairs
                             objpoints.append(objp)
                             imgpoints_1.append(corners1)
@@ -140,7 +172,7 @@ class faceTriangulation():
         stereocalibration_flags = cv2.CALIB_FIX_INTRINSIC
         ret, CM1, dist1, CM2, dist2, R, T, E, F = cv2.stereoCalibrate(objpoints,
                                                                       imgpoints_1,
-                                                                      imgpoints_1,
+                                                                      imgpoints_2,
                                                                       self.cameras[0].camera_matrix,
                                                                       self.cameras[0].distortion,
                                                                       self.cameras[1].camera_matrix,
@@ -198,11 +230,51 @@ class faceTriangulation():
 
         return value
 
+    def DLT(self, P1, P2, point1, point2):
+        A = [point1[1] * P1[2, :] - P1[1, :],
+             P1[0, :] - point1[0] * P1[2, :],
+             point2[1] * P2[2, :] - P2[1, :],
+             P2[0, :] - point2[0] * P2[2, :]
+             ]
+        A = np.array(A).reshape((4, 4))
+        B = A.transpose() @ A
+        U, s, Vh = linalg.svd(B, full_matrices=False)
+
+        return Vh[3, 0:3] / Vh[3, 3]
+
     def triangulate_face(self, img1, img2):
         """
         :param img1 & img2:  Rectified images from both cameras
         :return:
         """
+        face1 = self.detect_face(img1)
+        face2 = self.detect_face(img2)
+
+        # rotation + translation matrix for camera 0 is identity.
+        RT1 = np.concatenate([np.eye(3), [[0], [0], [0]]], axis=-1)
+        P1 = self.cameras[0].camera_matrix @ RT1  # projection matrix for C1
+
+        # Rotation x translation matrix for camera 1 is the rotation and translation matrix obtained by
+        # the stereo-calibration.
+        RT2 = np.concatenate([self.rotation_matrix, self.translation_matrix], axis=-1)
+        P2 = self.cameras[1].camera_matrix @ RT2
+
+        try:
+            face_coordinates = self.DLT(P1, P2, face1, face2)
+        except IndexError:
+            face_coordinates = self.face_coordinates
+        # Using the previous value for face1, face2 and face_coordinates, if no face was detected.
+        self.face_coordinates = face_coordinates
+        if len(face1) == 2:
+            self.face1 = face1
+        if len(face2) == 2:
+            self.face2 = face2
+
+        face1 = self.face1
+        face2 = self.face2
+
+        return face1, face2
+
 
 
 
@@ -271,6 +343,9 @@ class spatialFacePosition(faceTriangulation):
 
         # Initializing the cameras
         self.cameras = [Camera(camera) for camera in self.cameras]
+        self.face_coordinates = [0,0,0]
+        self.face1 = [0, 0]
+        self.face2 = [0, 0]
 
     def __str__(self):
         return self.name
@@ -300,6 +375,111 @@ class spatialFacePosition(faceTriangulation):
             print("No configurations.json file found!")
             return False
 
+
+    def detect_face(self, img):
+        """
+        Detects faces in an img using the face_detection attribute and uses the face_handeler to select the correct
+        face from all detected faces.
+        :param img:         Image from a camera
+        :return:            face_coordinates
+        """
+        faces = self.face_detection(img)
+        face = self.handle_faces(faces)
+        return face
+
+    def triangulate_checkerboard(self, rows=7, columns=9):
+        """
+        Just for testing, triangulates all corners of a checkerboard in 3D space.
+        After triangulation, the coordinates are shown in a 3D plot to check if they resemble a checkerboard.
+        """
+        # inner lines of a checkerboard are allways one less than the number of rows and columns
+        rows -= 1
+        columns -= 1
+
+        # for checkerboard detection
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.0001)
+
+        while True:
+            # reading the frames form the cameras
+            success1, img1 = self.cameras[0].read()
+            success2, img2 = self.cameras[1].read()
+
+            if success1 and success2:
+                # Displaying the images
+                cv2.imshow(f"{self.cameras[0]}", img1)
+                cv2.imshow(f"{self.cameras[1]}", img2)
+                key = cv2.waitKey(1)
+                if key == 27:  # esc stops the calibration process
+                    print("Aborting.")
+                    return
+                # press any key except esc to take the frame for calibration
+                if key > 0:
+                    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGRA2GRAY)
+                    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGRA2GRAY)
+
+                    # Detecting the checkerboard corners
+                    corner_success1, corners1 = cv2.findChessboardCorners(gray1, (rows, columns), None)
+                    corner_success2, corners2 = cv2.findChessboardCorners(gray2, (rows, columns), None)
+                    print('Tryining to detect checkerboard', corner_success1, corner_success2)
+                    if corner_success2 and corner_success1:
+                        # Refining the detection
+                        corners1 = cv2.cornerSubPix(gray1, corners1, (11, 11), (-1, -1), criteria)
+                        corners2 = cv2.cornerSubPix(gray2, corners2, (11, 11), (-1, -1), criteria)
+                        # Showing the detection
+                        cv2.drawChessboardCorners(img1, (rows, columns), corners1, corner_success1)
+                        cv2.drawChessboardCorners(img2, (rows, columns), corners2, corner_success2)
+                        for i, [corner] in enumerate(corners1):
+                            cv2.putText(img1, f'{i}', (int(corner[0]), int(corner[1])), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 0, 255), 1)
+                        for i, [corner] in enumerate(corners2):
+                            cv2.putText(img2, f'{i}', (int(corner[0]), int(corner[1])), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 0, 255), 1)
+                        cv2.imshow(f'Detection {self.cameras[0]}', img1)
+                        cv2.imshow(f'Detection {self.cameras[1]}', img2)
+                        key = cv2.waitKey(0)
+                        # press any key to continue
+                        if key > 0:
+                            # storing the realworld/ image-space coordinate pairs
+                            # rotation + translation matrix for camera 0 is identity.
+                            RT1 = np.concatenate([np.eye(3), [[0], [0], [0]]], axis=-1)
+                            P1 = self.cameras[0].camera_matrix @ RT1  # projection matrix for C1
+
+                            # Rotation x translation matrix for camera 1 is the rotation and translation matrix obtained by
+                            # the stereo-calibration.
+                            RT2 = np.concatenate([self.rotation_matrix, self.translation_matrix], axis=-1)
+                            P2 = self.cameras[1].camera_matrix @ RT2
+                            coordinates = []
+                            for c1, c2 in zip(corners1, corners2):
+                                coordinates.append(self.DLT(P1, P2, c1[0], c2[0]))
+                            break
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+
+        for x, y, z in coordinates:
+            ax.scatter(x, y, z, c="red", s=8)
+
+        # plotting the cameras
+        # camera 1
+        ax.scatter(0, 0, 0, c="green", s=15)  # Adjust the size (s) to  make it larger
+
+        # Camera 2
+        cam2_pos = [x[0] for x in self.translation_matrix]
+        ax.scatter(cam2_pos[0], cam2_pos[1], cam2_pos[2], c="green", s=10)
+
+        coordinates.append([0, 0, 0])
+        coordinates.append(cam2_pos)
+
+        x_coords = [c[0] for c in coordinates]
+        y_coords = [c[1] for c in coordinates]
+        z_coords = [c[2] for c in coordinates]
+
+        ax.set_xlim([min(x_coords), max(x_coords)])
+        ax.set_ylim([min(y_coords), max(y_coords)])
+        ax.set_zlim([min(z_coords), max(z_coords)])
+        ax.set_box_aspect([np.ptp(x_coords), np.ptp(y_coords), np.ptp(z_coords)])
+        plt.show()
+
+
+
+
     def __call__(self):
         """
         Reads both streams, loads just one frame and predicts the spatial position of the head in relation to the
@@ -309,18 +489,15 @@ class spatialFacePosition(faceTriangulation):
         """
         #####!!!! rewrite for an abitrary ammount of cameras!
         sucess1, img1 = self.cameras[0].read()
-        sucess2, img2 = self.cameras[0].read()
+        sucess2, img2 = self.cameras[1].read()
 
         if not sucess2 or not sucess1:
             print('Could not read both Cams')
             return False
 
-        ##### Frame Rectification #####
-        # Undisort and rectify images using the stereoMap generated during calibration
-
-        img1 = cv2.remap(img1, self.stereoMap1_x, self.stereoMap1_y, cv2.INTER_LANCZOS4)
-        img2 = cv2.remap(img2, self.stereoMap2_x, self.stereoMap2_y, cv2.INTER_LANCZOS4)
         face1, face2 = self.triangulate_face(img1, img2)
 
-        return self.current_depth, face1, face2, img1, img2
+        face_coordinates = self.face_coordinates
+
+        return face_coordinates, img1, img2, face1, face2
 

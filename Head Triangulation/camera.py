@@ -177,3 +177,105 @@ class Camera():
         cv2.destroyWindow(f'Camera: {self}')
         self.calibrated = True
 
+    def second_calibration(self, rows=7, columns=9, n_images=10, scaling=0.025):
+            """
+            Calibrates the camera, but on undistorted images using the distortion paramaters generated in the first
+            calibration.
+            :param rows:        Number of rows in chessboard-pattern.
+            :param columns:     Number of columns in chessboard-pattern.
+            :param scaling:     Realworld size of a chess-board square to scale the coordinate system.
+                                I will try to keep all units in meters so a good initial value for this will be 0.01 or 1 cm
+
+            :n_images:          Number of photos that will be taken for calibration.
+            :return:
+            """
+            assert n_images > 0, "n_images must be larger than zero!"
+            try:
+                x = self.camera_matrix
+                y = self.distortion
+            except Exception:
+                print("Camera not configured properly, could not load camera_matrix or distrortion. Maybe first ",
+                      "calibration was not successfull.")
+
+            # Only chessboard corners with all four sides being squares can be detected. (B W) Therefor the detectable
+            # chessboard is one smaller in number of rows and columns.                   (W B)
+            rows -= 1
+            columns -= 1
+            # termination criteria
+            # If no chessboard-pattern is detected, change this... Don't ask me what to change about it!
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+
+            # prepare object points, lower left corner of chessboard will be world coordinate (0, 0, 0)
+            objp = np.zeros((columns * rows, 3), np.float32)
+            objp[:, :2] = np.mgrid[0:rows, 0:columns].T.reshape(-1, 2)
+            objp = scaling * objp
+
+            # Chessboard pixel coordinates (2D)
+            imgpoints = []
+            # Chessboard pixel coordinates in world-space (3D). Coordinate system defined by chessboard.
+            objpoints = []
+
+            while True:
+                success, img = self.read()
+
+                if len(imgpoints) >= n_images:  # Processed enough pictures
+                    break
+                if success:
+                    ##### Undistorting the image
+                    h, w = img.shape[:2]
+                    newcameramtx, roi = cv2.getOptimalNewCameraMatrix(self.camera_matrix,
+                                                                      self.distortion, (w, h), 1, (w, h))
+
+                    img = cv2.undistort(img, self.camera_matrix, self.distortion, None,
+                                        newcameramtx)
+
+                    #####
+                    cv2.imshow(f'Camera: {self}', img)
+                    k = cv2.waitKey(1)
+                    if k > 0:
+                        gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+                        # localizing the chessboard corners in image-space.
+                        ret, corners = cv2.findChessboardCorners(gray, (rows, columns), None)
+                        if ret:
+                            # trying to improve the detection of the chessboard corners!
+                            corners = cv2.cornerSubPix(gray,
+                                                       corners,
+                                                       (11, 11),  # size of kernel!
+                                                       (-1, -1),
+                                                       criteria)
+                            cv2.drawChessboardCorners(img, (rows, columns), corners, ret)
+                            cv2.imshow(f'Chessboard corners; Camera: {self}', img)
+                            cv2.waitKey(0)
+                            cv2.destroyWindow(f'Chessboard corners; Camera: {self}')
+
+                            objpoints.append(objp)
+                            imgpoints.append(corners)
+
+            # Camera resolution
+            success, img = self.read()
+            height = img.shape[0]
+            width = img.shape[1]
+
+            ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, (width, height), None, None)
+            print('rmse:', ret)
+            print('camera matrix:\n', mtx)
+            print('distortion coeffs:', dist)
+            print('Rs:\n', rvecs)
+            print('Ts:\n', tvecs)
+
+            self.second_projection_error = ret
+            self.second_camera_matrix = mtx
+            self.second_distortion = dist
+            self.second_rvecs = rvecs
+            self.second_tvecs = tvecs
+
+            # Updating the camera_configuration.json file
+            self.set_config("second_projection_error", self.projection_error)
+            self.set_config("second_camera_matrix", self.camera_matrix)
+            self.set_config("second_distortion", self.distortion)
+            self.set_config("second_rvecs", self.rvecs)
+            self.set_config("second_tvecs", self.tvecs)
+            # closing the window after calibration
+            cv2.destroyWindow(f'Camera: {self}')
+            self.calibrated = True
+
