@@ -9,84 +9,23 @@ from scipy import linalg
 from camera import Camera
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
-
-
-
-class faceDetection():
-    """
-    Callable class that detects faces in images.
-    In this case the point between the eyes is used as the point location of the face.
-
-    This can be done because cvzone detects FaceMeshes including eyes.
-    """
-    def __init__(self):
-        self.detector = FaceMeshDetector(maxFaces=1, staticMode=True)
-
-    def __call__(self, img):
-        img, faces = self.detector.findFaceMesh(img, draw=False)
-        # face landmarks 145 and 374 should be the right and the left eye. The position between these points is
-        # calculated directly
-        faces = [(np.array(face[145]) + np.array(face[374]))/2 for face in faces]
-        return faces
-
-class checkerboardDetection():
-    """
-    Callable class that detects all checkerboard corners in an image, containing a 5x7 checkerboard
-
-    This class is meant for debugging purposes, because the checkerboard-corner localization is much more precise than
-    the facedetection.
-    """
-    def __init__(self):
-        pass
-
-
-    def __call__(self, img):
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.0001)
-        gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-
-        # Detecting the checkerboard corners
-        corner_success, corners = cv2.findChessboardCorners(gray, (4, 6), None)
-        if corner_success:
-            # Refining the detection
-            corners = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), criteria)
-        else:
-            corners = [[[]]]
-        # unpacking the inner lists
-        corners = [c[0] for c in corners]
-        return corners
-
-
-class faceHandeler():
-    """
-    Callable class, that handles which face from a list of face landmarks should be focussed on.
-    This could be important if multiple faces are detected.
-
-    Currently, this is just a placeholder, and it will just return the first face in the list
-    """
-
-    def __init__(self):
-        pass
-
-    def __call__(self, faces):
-        """
-
-        :param faces: List of lists of face landmarks
-        :return:      list of face landmarks for a single face
-        """
-
-        if len(faces) == 0:
-            return faces
-        faces = faces[0]
-        return faces
+import subprocess
+from face_detection import *
 
 
 class faceTriangulation():
-    def stero_calibrate(self, rows=5, columns=7, n_images=6, scaling=0.01):
+    def stero_calibrate(self, rows=7, columns=9, n_images=6, scaling=0.025):
         """
         Calibrates the cameras for stereovision via several chess-board images.
         The calibration function should be automated in the future by automatic chess-board detection
 
         """
+
+        for camera in self.cameras:
+            if not camera.calibrated:
+                print(f"Camera {camera} is not calibrated please calibrate all cameras first!")
+                return
+
         # open cv can only detect inner corners, so reducing the rows and columns by one
         rows -= 1
         columns -= 1
@@ -113,11 +52,20 @@ class faceTriangulation():
         while len(imgpoints_1) < n_images:
             # reading the frames form the cameras
             success1, img1 = self.cameras[0].read()
+            img_old = np.array(img1)
             success2, img2 = self.cameras[1].read()
 
+            # For fisheye cameras a fisheye calibration is done first and then a pinhole calibration followup, for
+            # stereo calibration, only the fisheye calibration has to be applied and undistorted
+            if self.cameras[0].fisheye:
+                img1 = self.cameras[0].undistort_fisheye(img1)
+                img_old = np.array(img1)
+            if self.cameras[1].fisheye:
+                img2 = self.cameras[1].undistort_fisheye(img1)
+
             # counting the number of successful detections
-            cv2.putText(img1, f'{len(imgpoints_1)}', (10, 10), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 255), 1)
-            cv2.putText(img2, f'{len(imgpoints_2)}', (10, 10), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 255), 1)
+            cv2.putText(img1, f'{len(imgpoints_1)}', (20, 20), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 255), 1)
+            cv2.putText(img2, f'{len(imgpoints_2)}', (20, 20), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 255), 1)
 
             if success1 and success2:
                 # Displaying the images
@@ -138,7 +86,6 @@ class faceTriangulation():
                     corner_success2, corners2 = cv2.findChessboardCorners(gray2, (rows, columns), None)
 
                     if corner_success2 and corner_success1:
-
                         # Refining the detection
                         corners1 = cv2.cornerSubPix(gray1, corners1, (11, 11), (-1, -1), criteria)
                         corners2 = cv2.cornerSubPix(gray2, corners2, (11, 11), (-1, -1), criteria)
@@ -154,11 +101,25 @@ class faceTriangulation():
                         cv2.imshow(f'Detection {self.cameras[0]}', img1)
                         cv2.imshow(f'Detection {self.cameras[1]}', img2)
                         key = cv2.waitKey(0)
-                        if key & 0xFF == ord('s'): # skipping if s is pressed
-                            print('skipping')
+
+                        if key & 0xFF == ord('s'):  # press s to switch ordering of img1
+                            cv2.destroyWindow(f'Detection {self.cameras[0]}')
+                            corners1 = corners1[::-1]
+                            # drawing the new corners
+                            cv2.drawChessboardCorners(img_old, (rows, columns), corners1, corner_success1)
+                            for i, [corner] in enumerate(corners1):
+                                cv2.putText(img_old, f'{i}', (int(corner[0]), int(corner[1])),
+                                            cv2.FONT_HERSHEY_COMPLEX,
+                                            1,
+                                            (0, 0, 255), 1)
+                            cv2.imshow(f'Detection {self.cameras[0]}', img_old)
+                            cv2.waitKey(0)
+                            # storing the realworld/ image-space coordinate pairs
+                            objpoints.append(objp)
+                            imgpoints_1.append(corners1)
+                            imgpoints_2.append(corners2)
                             cv2.destroyWindow(f'Detection {self.cameras[0]}')
                             cv2.destroyWindow(f'Detection {self.cameras[1]}')
-                            continue
 
                         # press any other key (except esc) to use the detection
                         elif key > 0:
@@ -193,8 +154,10 @@ class faceTriangulation():
         self.set_config("stereo_calibration_error", ret)
         self.set_config("translation_matrix", T)
         self.set_config("rotation_matrix", R)
-        return
 
+        cv2.destroyAllWindows()
+
+        return
 
     def set_config(self, config_name, value):
         try:
@@ -247,23 +210,27 @@ class faceTriangulation():
         :param img1 & img2:  Rectified images from both cameras
         :return:
         """
+
         face1 = self.detect_face(img1)
+        time_face1 = time.time()
         face2 = self.detect_face(img2)
+        time_face2 = time.time()
+        print(f"Time delta beteween frames {time_face1 - time_face2}s")
 
         # rotation + translation matrix for camera 0 is identity.
         RT1 = np.concatenate([np.eye(3), [[0], [0], [0]]], axis=-1)
-        P1 = self.cameras[0].camera_matrix @ RT1  # projection matrix for C1
+        P1 = self.cameras[0].current_camera_matrix @ RT1  # projection matrix for C1
 
         # Rotation x translation matrix for camera 1 is the rotation and translation matrix obtained by
         # the stereo-calibration.
         RT2 = np.concatenate([self.rotation_matrix, self.translation_matrix], axis=-1)
-        P2 = self.cameras[1].camera_matrix @ RT2
+        P2 = self.cameras[1].current_camera_matrix @ RT2
 
+        # Using the previous value for face1, face2 and face_coordinates, if no face was detected.
         try:
             face_coordinates = self.DLT(P1, P2, face1, face2)
         except IndexError:
             face_coordinates = self.face_coordinates
-        # Using the previous value for face1, face2 and face_coordinates, if no face was detected.
         self.face_coordinates = face_coordinates
         if len(face1) == 2:
             self.face1 = face1
@@ -275,7 +242,272 @@ class faceTriangulation():
 
         return face1, face2
 
+        # Function to compute the transformation matrix
+    def compute_transform_matrix(self, points_A, points_B):
+        """Calculates the transform matrix to transform any point of one coordinatesystem (3d) to another"""
+        # Assuming points_A and points_B are numpy arrays with shape (N, 3)
+        # where N is the number of points (N >= 3),
+        # Reshaping the points
+        points_A = np.array(points_A)
+        points_B = np.array(points_B)
+        points_A = points_A.T
+        points_B = points_B.T
 
+        # Calculate the centroids of both point sets
+        centroid_A = np.mean(points_A, axis=1, keepdims=True)
+        centroid_B = np.mean(points_B, axis=1, keepdims=True)
+
+        # Compute the centered point sets
+        centered_A = points_A - centroid_A
+        centered_B = points_B - centroid_B
+
+        # Compute the covariance matrix
+        covariance_matrix = centered_A @ centered_B.T
+
+        # Perform Singular Value Decomposition
+        U, _, Vt = np.linalg.svd(covariance_matrix)
+
+        # Calculate the rotation matrix
+        rotation_matrix = Vt.T @ U.T
+
+        # Calculate the translation vector
+        translation_vector = centroid_B - rotation_matrix @ centroid_A
+
+        # Create the transformation matrix
+        transform_matrix = np.eye(4)
+        transform_matrix[:3, :3] = rotation_matrix
+        transform_matrix[:3, 3] = translation_vector.flatten()
+        return transform_matrix
+
+    def transform_point(self, point, transform_matrix):
+        """Transforms a point to a nother coordinate system (3d) based on a transform_matrix"""
+        # point needs one extra dimension
+        point = np.array([point])
+        point_homogeneous = np.hstack((point, np.ones((1, 1))))
+        new_point_homogeneous = transform_matrix @ point_homogeneous.T
+
+        # Extract the transformed point in system B
+        new_point = new_point_homogeneous[:3, :].T
+        print(new_point)
+        return new_point[0]
+
+    def calibrate_display_center(self, rows=4, columns=5,
+                                 points=[(0.485, 0.03, 0.0375), (0.485, 0.055, 0.0375), (0.485, 0.08, 0.0375),
+                                         (0.485, 0.03, 0.0125), (0.485, 0.055, 0.0125), (0.485, 0.08, 0.0125),
+                                         (0.485, 0.03, -0.0125), (0.485, 0.055, -0.0125), (0.485, 0.08, -0.0125),
+                                         (0.485, 0.03, -0.0375), (0.485, 0.055, -0.0375), (0.485, 0.08, -0.0375)]):
+        """
+        Changes the coordinate system to a coordinate system based in the display center using the calibration device
+        :param rows:
+        :param columns:
+        :param points:      Corresponding points in the target coorddinate system.
+                            In case of the first calibration device, the detected points must follow the following
+                            order in the image space:
+                            2, 5, 8, 11
+                            1, 4, 7, 10
+                            0, 3, 6, 9
+        :return:
+        """
+        points = np.array(points) #convert to meters
+
+        # inner lines of a checkerboard are allways one less than the number of rows and columns
+        rows -= 1
+        columns -= 1
+
+        # showing dots to show screen center for calibration device
+        # !!!!! Richtig schlechter Code!!!!! Ändern! und intern über pygame regeln
+        try:
+            subprocess.Popen(["python", "show_dots.py"])
+        except Exception as exception:
+            print(f"Exception during subprocess call: {exception}")
+
+        # Global variables to store the selected region points
+        global selected_points_img1
+        global selected_points_img2
+
+        selected_points_img1 = []
+        selected_points_img2 = []
+        while True:
+            # reading the frames form the cameras
+            success1, img1 = self.cameras[0].read()
+            img_old = np.array(img1)
+            success2, img2 = self.cameras[1].read()
+
+            img1 = self.cameras[0].undistort_image(img1)
+            img2 = self.cameras[1].undistort_image(img2)
+
+            if success1 and success2:
+
+                def mouse_callback_img1(event, x, y, flags, param):
+                    global selected_points_img1
+                    if event == cv2.EVENT_LBUTTONDOWN:
+                        print("Left mouse button pressed!", selected_points_img1)
+                        selected_points_img1.append((x, y))
+
+
+                def mouse_callback_img2(event, x, y, flags, param):
+                    global selected_points_img2
+                    if event == cv2.EVENT_LBUTTONDOWN:
+                        print("Left mouse button pressed!", selected_points_img2)
+                        selected_points_img2.append((x, y))
+
+
+                cv2.namedWindow("img1")
+                cv2.namedWindow("img2")
+                # Set mouse callbacks
+                cv2.setMouseCallback("img1", mouse_callback_img1)
+                cv2.setMouseCallback("img2", mouse_callback_img2)
+
+                cv2.imshow(f"img1", img1)
+                cv2.imshow(f"img2", img2)
+
+                key = cv2.waitKey(1)
+                if key == 27:  # esc stops the calibration process
+                    print("Aborting.")
+                    return
+                # press any key except esc to take the frame for calibration
+                if key > 0:
+                    # Wait for the user to select the region in both images
+                    while len(selected_points_img1) < 2 or len(selected_points_img2) < 2:
+                        key = cv2.waitKey(1)
+                        if key == 27:  # esc stops the calibration process
+                            print("Aborting.")
+                            return
+                    # Inpainting the selected regions
+                    cv2.rectangle(img1, selected_points_img1[0], selected_points_img1[1], (0, 255, 0), 2)
+                    cv2.imshow("img1", img1)
+                    cv2.rectangle(img2, selected_points_img2[0], selected_points_img2[1], (0, 255, 0), 2)
+                    cv2.imshow("img2", img2)
+                    key = cv2.waitKey(0)
+                    # Extract the selected regions from img1 and img2
+
+                    offset1 = [min([selected_points_img1[0][0], selected_points_img1[1][0]]),
+                                    min([selected_points_img1[0][1], selected_points_img1[1][1]])]
+                    offset2 = [min([selected_points_img2[0][0], selected_points_img2[1][0]]),
+                                    min([selected_points_img2[0][1], selected_points_img2[1][1]])]
+
+                    img1 = img1[selected_points_img1[0][1]:selected_points_img1[1][1],
+                               selected_points_img1[0][0]:selected_points_img1[1][0]]
+                    img2 = img2[selected_points_img2[0][1]:selected_points_img2[1][1],
+                               selected_points_img2[0][0]:selected_points_img2[1][0]]
+
+                    #save copies of original  images
+                    img1_old = np.array(img1)
+                    img2_old = np.array(img2)
+                    # Reset selected points
+                    selected_points_img1 = []
+                    selected_points_img2 = []
+                    # Detecting the checkerboard corners
+                    # for checkerboard detection
+
+                    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGRA2GRAY)
+                    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGRA2GRAY)
+                    # gray1 = cv2.adaptiveThreshold(gray1, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+                    # very cool effect, but does not improve detection
+                    # gray2 = cv2.adaptiveThreshold(gray2, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+
+                    corner_success1, corners1 = cv2.findChessboardCorners(gray1, (rows, columns),None)
+                    corner_success2, corners2 = cv2.findChessboardCorners(gray2, (rows, columns),None)
+                    if corner_success2 and corner_success1:
+                        cv2.destroyWindow(f'img1')
+                        cv2.destroyWindow(f'img2')
+                        # Refining the detection
+                        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.00001)
+                        corners1 = cv2.cornerSubPix(gray1, corners1, (11, 11), (-1, -1), criteria)
+                        corners2 = cv2.cornerSubPix(gray2, corners2, (11, 11), (-1, -1), criteria)
+
+                        # Showing the detection
+                        cv2.drawChessboardCorners(gray1, (rows, columns), corners1, corner_success1)
+                        cv2.drawChessboardCorners(gray2, (rows, columns), corners2, corner_success2)
+                        for i, [corner] in enumerate(corners1): # Check if enumeration is consistent
+                            cv2.putText(gray1, f'{i}', (int(corner[0]), int(corner[1])), cv2.FONT_HERSHEY_COMPLEX, 1,
+                                        (0, 0, 255), 1)
+                        for i, [corner] in enumerate(corners2):
+                            cv2.putText(gray2, f'{i}', (int(corner[0]), int(corner[1])), cv2.FONT_HERSHEY_COMPLEX, 1,
+                                        (0, 0, 255), 1)
+
+                        cv2.imshow(f'Detection {self.cameras[0]}', gray1)
+                        cv2.imshow(f'Detection {self.cameras[1]}', gray2)
+                        key = cv2.waitKey(0)
+
+                        if key & 0xFF == ord('s'):  # press s to switch corners ordering of img1
+                            cv2.destroyWindow(f'Detection {self.cameras[0]}')
+                            # reversing the order of the corners
+                            corners1 = corners1[::-1]
+                            # drawing the new corners
+                            cv2.drawChessboardCorners(img1_old, (rows, columns), corners1, corner_success1)
+                            for i, [corner] in enumerate(corners1):  # Check if enumeration is consistent
+                                cv2.putText(img1_old, f'{i}', (int(corner[0]), int(corner[1])), cv2.FONT_HERSHEY_COMPLEX,
+                                            1,
+                                            (0, 0, 255), 1)
+                            cv2.imshow(f'Detection {self.cameras[0]}', img1_old)
+                            cv2.waitKey(0)
+                        elif key > 0:  # press any other key to continue with the triangulation
+                            # storing the realworld / image-space coordinate pairs
+                            # rotation + translation matrix for camera 0 is identity.
+                            RT1 = np.concatenate([np.eye(3), [[0], [0], [0]]], axis=-1)
+                            P1 = self.cameras[0].optimized_camera_matrix @ RT1  # projection matrix for C1
+
+                            # Rotation x translation matrix for camera 1 is the rotation and translation matrix obtained by
+                            # the stereo-calibration.
+                            RT2 = np.concatenate([self.rotation_matrix, self.translation_matrix], axis=-1)
+                            P2 = self.cameras[1].optimized_camera_matrix @ RT2  # projection matrix for C1
+
+                            coordinates = []
+                            # removing the scaling and adding the offset to get pixle coordinates in whole image
+                            corners1 = [corner + offset1 for corner in corners1]
+                            corners2 = [corner + offset2 for corner in corners2]
+
+                            # triangulating the coordinates
+                            for c1, c2 in zip(corners1, corners2):
+                                coordinates.append(self.DLT(P1, P2, c1[0], c2[0]))
+                            break
+        print("Coordinates", coordinates)
+
+        # calculating the transformation matrix to transform from camera coordiante system to display center coordiante system
+        transform_matrix = self.compute_transform_matrix(coordinates, points)
+        self.transform_matrix = transform_matrix
+        self.display_center_calibrated = True
+        self.set_config("transform_matrix", transform_matrix)
+
+        # transform to display coordinatesystem
+        coordinates = [self.transform_point(point, self.transform_matrix) for point in coordinates]
+        #coordinates = points.tolist()
+
+        fig = plt.figure()
+        ax = fig.add_subplot(111, projection='3d')
+
+        for x, y, z in coordinates:
+            ax.scatter(x, y, z, c="red", s=8)
+
+        # plotting the cameras
+        # camera 1
+        cam1_pos = self.transform_point([0,0,0], self.transform_matrix)
+        ax.scatter(cam1_pos[0], cam1_pos[1], cam1_pos[2], c="green", s=15)
+
+        # Camera 2
+        cam2_pos = [-x[0] for x in self.translation_matrix]
+        cam2_pos = self.transform_point(cam2_pos, self.transform_matrix)
+        ax.scatter(cam2_pos[0], cam2_pos[1], cam2_pos[2], c="green", s=15)
+
+        # Plotting the display center
+        ax.scatter(0,0,0, c="blue", s=30)
+
+        # add camera positions
+        coordinates.append(cam1_pos)
+        coordinates.append(cam2_pos)
+
+        # add display center
+        coordinates.append([0,0,0])
+        x_coords = [c[0] for c in coordinates]
+        y_coords = [c[1] for c in coordinates]
+        z_coords = [c[2] for c in coordinates]
+
+        ax.set_xlim([min(x_coords), max(x_coords)])
+        ax.set_ylim([min(y_coords), max(y_coords)])
+        ax.set_zlim([min(z_coords), max(z_coords)])
+        ax.set_box_aspect([np.ptp(x_coords), np.ptp(y_coords), np.ptp(z_coords)])
+        plt.show()
 
 
 class spatialFacePosition(faceTriangulation):
@@ -335,6 +567,7 @@ class spatialFacePosition(faceTriangulation):
         # Loading the configurations for this setup!
         self.name = name
         self.stereo_calibrated = False    # will be set to True during stereo-calibration or load config
+        self.display_center_calibrated = False
         if not self.load_config():
             print(f"No SpatialFacePosition configuration named {self.name} found!")
         self.face_detection = face_detection
@@ -347,9 +580,6 @@ class spatialFacePosition(faceTriangulation):
         self.face1 = [0, 0]
         self.face2 = [0, 0]
 
-    def __str__(self):
-        return self.name
-
     def load_config(self):
         """
         If a configuration with the same name was already initialized, there will be a JSON file with
@@ -359,9 +589,6 @@ class spatialFacePosition(faceTriangulation):
             with open('face_position_configurations.json', 'r') as json_file:
                 configurations = json.load(json_file)
                 self.cameras = configurations[self.name]["cameras"]
-                self.monitor_center = configurations[self.name]["monitor_center"]
-                self.monitor_normal = configurations[self.name]["monitor_normal"]
-                self.monitor_rotation = configurations[self.name]["monitor_rotation"]
                 # loading parameters that are only stored after stereo-calibration
                 try:
                     self.rotation_matrix = configurations[self.name]["rotation_matrix"]
@@ -369,12 +596,18 @@ class spatialFacePosition(faceTriangulation):
                     self.stereo_calibrated = True
                 except KeyError:
                     self.stereo_calibrated = False
+                # loading the parameters that are only stored after display-center-calibration
+                try:
+                    self.transform_matrix = configurations[self.name]["transform_matrix"]
+                    self.display_center_calibrated = True
+                except KeyError:
+                    self.display_center_calibrated = False
+
             return True
 
         except FileNotFoundError:
             print("No configurations.json file found!")
             return False
-
 
     def detect_face(self, img):
         """
@@ -404,6 +637,11 @@ class spatialFacePosition(faceTriangulation):
             success1, img1 = self.cameras[0].read()
             success2, img2 = self.cameras[1].read()
 
+
+            img1 = self.cameras[0].undistort_image(img1)
+            img2 = self.cameras[1].undistort_image(img2)
+
+
             if success1 and success2:
                 # Displaying the images
                 cv2.imshow(f"{self.cameras[0]}", img1)
@@ -420,7 +658,7 @@ class spatialFacePosition(faceTriangulation):
                     # Detecting the checkerboard corners
                     corner_success1, corners1 = cv2.findChessboardCorners(gray1, (rows, columns), None)
                     corner_success2, corners2 = cv2.findChessboardCorners(gray2, (rows, columns), None)
-                    print('Tryining to detect checkerboard', corner_success1, corner_success2)
+
                     if corner_success2 and corner_success1:
                         # Refining the detection
                         corners1 = cv2.cornerSubPix(gray1, corners1, (11, 11), (-1, -1), criteria)
@@ -432,20 +670,30 @@ class spatialFacePosition(faceTriangulation):
                             cv2.putText(img1, f'{i}', (int(corner[0]), int(corner[1])), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 0, 255), 1)
                         for i, [corner] in enumerate(corners2):
                             cv2.putText(img2, f'{i}', (int(corner[0]), int(corner[1])), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 0, 255), 1)
+
                         cv2.imshow(f'Detection {self.cameras[0]}', img1)
                         cv2.imshow(f'Detection {self.cameras[1]}', img2)
                         key = cv2.waitKey(0)
-                        # press any key to continue
-                        if key > 0:
+
+                        if key & 0xFF == ord('s'): # press s to skip due to bad prediction
+                            cv2.destroyWindow(f'Detection {self.cameras[0]}')
+                            cv2.destroyWindow(f'Detection {self.cameras[1]}')
+                            continue
+                        elif key > 0: # press any other key to continue with the triangulation
                             # storing the realworld/ image-space coordinate pairs
                             # rotation + translation matrix for camera 0 is identity.
                             RT1 = np.concatenate([np.eye(3), [[0], [0], [0]]], axis=-1)
-                            P1 = self.cameras[0].camera_matrix @ RT1  # projection matrix for C1
+                            #P1 = self.cameras[0].camera_matrix @ RT1  # projection matrix for C1
+                            # Testing with undistorted images
+                            P1 = self.cameras[0].optimized_camera_matrix @ RT1  # projection matrix for C1
 
                             # Rotation x translation matrix for camera 1 is the rotation and translation matrix obtained by
                             # the stereo-calibration.
                             RT2 = np.concatenate([self.rotation_matrix, self.translation_matrix], axis=-1)
-                            P2 = self.cameras[1].camera_matrix @ RT2
+                            #P2 = self.cameras[1].camera_matrix @ RT2
+                            # Testing with undistorted images
+                            P2 = self.cameras[1].optimized_camera_matrix @ RT2  # projection matrix for C1
+
                             coordinates = []
                             for c1, c2 in zip(corners1, corners2):
                                 coordinates.append(self.DLT(P1, P2, c1[0], c2[0]))
@@ -461,7 +709,7 @@ class spatialFacePosition(faceTriangulation):
         ax.scatter(0, 0, 0, c="green", s=15)  # Adjust the size (s) to  make it larger
 
         # Camera 2
-        cam2_pos = [x[0] for x in self.translation_matrix]
+        cam2_pos = [-x[0] for x in self.translation_matrix]
         ax.scatter(cam2_pos[0], cam2_pos[1], cam2_pos[2], c="green", s=10)
 
         coordinates.append([0, 0, 0])
@@ -477,9 +725,6 @@ class spatialFacePosition(faceTriangulation):
         ax.set_box_aspect([np.ptp(x_coords), np.ptp(y_coords), np.ptp(z_coords)])
         plt.show()
 
-
-
-
     def __call__(self):
         """
         Reads both streams, loads just one frame and predicts the spatial position of the head in relation to the
@@ -487,17 +732,32 @@ class spatialFacePosition(faceTriangulation):
 
         :return:    Success face_pos img1 (with face annotations) img2 (with face annotations)
         """
-        #####!!!! rewrite for an abitrary ammount of cameras!
+        #####! rewrite for an abitrary ammount of cameras!
         sucess1, img1 = self.cameras[0].read()
         sucess2, img2 = self.cameras[1].read()
+
+
+        img1 = self.cameras[0].undistort_image(img1)
+        img2 = self.cameras[1].undistort_image(img2)
+        self.cameras[0].current_camera_matrix = self.cameras[0].optimized_camera_matrix
+        self.cameras[1].current_camera_matrix = self.cameras[1].optimized_camera_matrix
+
 
         if not sucess2 or not sucess1:
             print('Could not read both Cams')
             return False
-
+        # face1 and face2 are image coorinates of the face, the 3d face coordinates will be saved in self.face_coordinates
         face1, face2 = self.triangulate_face(img1, img2)
 
         face_coordinates = self.face_coordinates
+        # convert to display coordinates if display_center_calibrated it transforms the face_coordinates for the coorinate
+        # system based in camera0 to a coordinate system based in the display center.
+        if self.display_center_calibrated:
+            face_coordinates = self.transform_point(face_coordinates, self.transform_matrix)
 
         return face_coordinates, img1, img2, face1, face2
 
+
+
+if __name__ == "__main__":
+    pass
