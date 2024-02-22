@@ -1,38 +1,15 @@
-import cv2
-from cvzone.FaceMeshModule import FaceMeshDetector
-from multiprocessing import get_context, TimeoutError
-import numpy as np
-import time
-import os
-import json
-import pickle as pk
-from camera import Camera
 from spatial_face_position import *
-from mpl_toolkits.mplot3d import Axes3D
-import matplotlib.pyplot as plt
+import pickle as pk
 
 
 def configure_spatial_face_positon(name,
-                                   cameras,
-                                   monitor_center=[0, 0, 0],
-                                   monitor_normal=[0, 0, 1],
-                                   monitor_rotation=[0, 1, 0]):
+                                   cameras):
         """
         stores the configuration of a spatialFacePosition setup.
         :param name:            Name of this setup, using this name the configuration will be stored in the
                                 face_position_configuration.json file.
         :param cameras:         Name of all cameras that will be used in this setup, the cameras must have a config
                                 using this name in the camera_configurations.json.
-
-        :param monitor_center:        [list] Vector pointing from the "main"-camera towards the monitor center. This
-                                      vector is based on the main-cameras coordinate system.
-        :param monitor_normal:        [list] Plane-normal of the monitor, based on the "main"-cameras coordinate system.
-                                      This vector is based on the main-cameras coordinate system.
-                                      It will also function as the x-axis in the screen coordinate system.
-        :param monitor_rotation:      [list] Vector that is parallel to the lower edge of the screen. It is also based
-                                      on the main-cameras coordinate system and will function as the z-coordinate in
-                                      the screen coordinate system.
-
         """
         # all configurations are stored in a single json file separated by their setup-names
         try:
@@ -41,12 +18,13 @@ def configure_spatial_face_positon(name,
         except FileNotFoundError:
             configurations = {}
 
-        # storing the general setup configurations
+        if name in configurations.keys():
+            print(f"Spatial face detection configurations named {name} already exists, aborting!")
+            return
+
+            # storing the general setup configurations
         configurations[name] = {
             "cameras": cameras,
-            "monitor_center": monitor_center,
-            "monitor_normal": monitor_normal,
-            "monitor_rotation": monitor_rotation
         }
 
         # saving the dict as JSON
@@ -54,7 +32,7 @@ def configure_spatial_face_positon(name,
             json.dump(configurations, json_file)
 
 
-def configure_camera(name, stream):
+def configure_camera(name, stream, resolution=[480, 640]):
     """
     stores the initial configuration of a Camera setup.
 
@@ -67,16 +45,24 @@ def configure_camera(name, stream):
     try:
         with open('camera_configuration.json', 'r') as json_file:
             configurations = json.load(json_file)
+            print('Successfully loaded previously written camera configurations')
     except FileNotFoundError:
+        print('Could not load previous camera configurations file, creating empty file.')
         configurations = {}
+
+    if name in configurations.keys():
+        print(f"Camera configurations named {name} already exists, aborting!")
+        return
 
     # storing the stream of the camera in a JSON format.
     configurations[name] = {
-        "stream": stream
+        "stream": stream,
+        "resolution": resolution  # height, width
     }
 
     # saving the dict as JSON
     with open('camera_configuration.json', 'w') as json_file:
+        print(configurations)
         json.dump(configurations, json_file)
 
 
@@ -93,33 +79,30 @@ def normalize(vector):
 
 
 if __name__ == "__main__":
-    #configure_camera("Camera0", 0)
-    #configure_camera("Camera1", 1)
-    #configure_spatial_face_positon("Setup Aachen 1", ["Camera0", "Camera1"])
+
+    #configure_camera("Camera0_720", 0, [720, 1280])
+    #configure_camera("Camera1_720", 1, [720, 1280])
+    #configure_spatial_face_positon("Setup Aachen 1 720", ["Camera0_720", "Camera1_720"])
     spatial_face_position = spatialFacePosition("Setup Aachen 1", face_detection=faceDetection())
-    if not spatial_face_position.stereo_calibrated:
-        spatial_face_position.stero_calibrate()
-    #for camera in spatial_face_position.cameras:
-           #camera.calibrate(scaling=0.025, n_images=10, rows=7, columns=9)
-           #camera.second_calibration()
-    #spatial_face_position.stero_calibrate(scaling=0.025, n_images=10, rows=7, columns=9)
-    for camera in spatial_face_position.cameras:
-        print("Internal Parameters")
-        print(camera.camera_matrix)
-        print(camera.distortion)
-    #spatial_face_position.triangulate_checkerboard(rows=7, columns=9)
 
+    #for i, camera in enumerate(spatial_face_position.cameras):
+        #print("Calibrating camera", camera, camera.fisheye)
+        #camera.fisheye_calibrate(rows=7, columns=9, n_images=10, scaling=0.025)
+        #camera.calibrate(scaling=0.025, n_images=10, rows=7, columns=9, fisheye=True)
 
+    #spatial_face_position.stero_calibrate(scaling=0.025, n_images=5, rows=7, columns=9)
 
-    face_coordinates = []
-    frames = []
+    #spatial_face_position.triangulate_checkerboard( )
+    #spatial_face_position.calibrate_display_center()
 
-    if True:
+    if True:   # Displays the triangulation results.
+        face_coordinates = []
+        frames = []
         while True:
             coordinate, frame1, frame2, face1, face2 = spatial_face_position()
-            print(frame1.shape)
+
             face_coordinates.append(coordinate)
-            print(coordinate)
+
             cv2.circle(frame1, [int(face1[0]), int(face1[1])], 5, (255, 0, 0), -1)
             frames.append(frame1)
             cv2.circle(frame2, [int(face2[0]), int(face2[1])], 5, (255, 0, 0), -1)
@@ -161,14 +144,20 @@ if __name__ == "__main__":
 
         # plotting the cameras
         # camera 1
-        ax.scatter(0, 0, 0, c="green", s=15)  # Adjust the size (s) to make it larger
+        cam1_pos = spatial_face_position.transform_point([0, 0, 0], spatial_face_position.transform_matrix)
+        ax.scatter(cam1_pos[0], cam1_pos[1], cam1_pos[2], c="green", s=15)  # Adjust the size (s) to make it larger
 
         # Camera 2
-        cam2_pos = [x[0] for x in spatial_face_position.translation_matrix]
-        ax.scatter(cam2_pos[0], cam2_pos[1], cam2_pos[2], c="green", s=10)
+        cam2_pos = [-x[0] for x in spatial_face_position.translation_matrix]
+        cam2_pos = spatial_face_position.transform_point(cam2_pos, spatial_face_position.transform_matrix)
+        ax.scatter(cam2_pos[0], cam2_pos[1], cam2_pos[2], c="green", s=15)
         face_coordinates = face_coordinates.tolist()
 
+        # Plotting the display center
+        ax.scatter(0,0,0, c="blue", s=50)
+
         face_coordinates.append([0,0,0])
+        face_coordinates.append(cam1_pos)
         face_coordinates.append(cam2_pos)
 
         x_coords = [c[0] for c in face_coordinates]
