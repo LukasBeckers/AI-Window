@@ -8,7 +8,7 @@ if __name__ == "__main__":
     while True:
         try:
             # Creating the spatial face position object
-            spatial_face_position = spatialFacePosition("Setup Aachen 1", face_detection=faceDetection())
+            spatial_face_position = spatialFacePosition("Setup Aachen 1 1080", face_detection=faceDetection())
 
             # Configuring the socket
             HOST = '127.0.0.1'  # Server IP address (localhost in this example)
