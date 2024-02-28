@@ -14,6 +14,17 @@ from face_detection import *
 
 
 class faceTriangulation():
+    def read_cameras_synchronized(self):
+        """
+        Reads all cameras of this face Trianuglation set up and returns them semi synchronized.
+        :return: list of camera frames
+        """
+        for _ in range(1):
+            for camera in self.cameras:
+                camera.stream.grab()
+        images = [camera.stream.retrieve()[1]for camera in self.cameras]
+        return images
+
     def stero_calibrate(self, rows=7, columns=9, n_images=6, scaling=0.025):
         """
         Calibrates the cameras for stereovision via several chess-board images.
@@ -54,14 +65,6 @@ class faceTriangulation():
             success1, img1 = self.cameras[0].read()
             img_old = np.array(img1)
             success2, img2 = self.cameras[1].read()
-
-            # For fisheye cameras a fisheye calibration is done first and then a pinhole calibration followup, for
-            # stereo calibration, only the fisheye calibration has to be applied and undistorted
-            if self.cameras[0].fisheye:
-                img1 = self.cameras[0].undistort_fisheye(img1)
-                img_old = np.array(img1)
-            if self.cameras[1].fisheye:
-                img2 = self.cameras[1].undistort_fisheye(img1)
 
             # counting the number of successful detections
             cv2.putText(img1, f'{len(imgpoints_1)}', (20, 20), cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 255), 1)
@@ -131,16 +134,35 @@ class faceTriangulation():
                             cv2.destroyWindow(f'Detection {self.cameras[1]}')
         # prerform stereo calibration on accumulated objectpoints
         stereocalibration_flags = cv2.CALIB_FIX_INTRINSIC
-        ret, CM1, dist1, CM2, dist2, R, T, E, F = cv2.stereoCalibrate(objpoints,
-                                                                      imgpoints_1,
-                                                                      imgpoints_2,
-                                                                      self.cameras[0].camera_matrix,
-                                                                      self.cameras[0].distortion,
-                                                                      self.cameras[1].camera_matrix,
-                                                                      self.cameras[1].distortion,
-                                                                      (width, height),
-                                                                      criteria=criteria,
-                                                                      flags=stereocalibration_flags)
+        if self.cameras[0].fisheye:
+            imgpoints_1 = np.array(imgpoints_1)
+            imgpoints_1 = np.swapaxes(imgpoints_1, axis1=1, axis2=2)
+            imgpoints_2 = np.array(imgpoints_2)
+            imgpoints_2 = np.swapaxes(imgpoints_2, axis1=1, axis2=2)
+            objpoints = np.array(objpoints)
+            objpoints = np.expand_dims(objpoints, axis=1)
+            res = cv2.fisheye.stereoCalibrate(objpoints,
+                                                                          imgpoints_1,
+                                                                          imgpoints_2,
+                                                                          self.cameras[0].fisheye_camera_matrix,
+                                                                          self.cameras[0].fisheye_distortion,
+                                                                          self.cameras[1].fisheye_camera_matrix,
+                                                                          self.cameras[1].fisheye_distortion,
+                                                                          (width, height),
+                                                                          criteria=criteria,
+                                                                          flags=stereocalibration_flags)
+            ret, CM1, dist1, CM2, dist2, R, T = res[:7]
+        else:
+            ret, CM1, dist1, CM2, dist2, R, T, E, F = cv2.stereoCalibrate(objpoints,
+                                                                          imgpoints_1,
+                                                                          imgpoints_2,
+                                                                          self.cameras[0].camera_matrix,
+                                                                          self.cameras[0].distortion,
+                                                                          self.cameras[1].camera_matrix,
+                                                                          self.cameras[1].distortion,
+                                                                          (width, height),
+                                                                          criteria=criteria,
+                                                                          flags=stereocalibration_flags)
 
         # Matrix that rotates the coordinate system of the second camera to match the first.
         self.rotation_matrix = R
@@ -156,7 +178,6 @@ class faceTriangulation():
         self.set_config("rotation_matrix", R)
 
         cv2.destroyAllWindows()
-
         return
 
     def set_config(self, config_name, value):
@@ -212,19 +233,23 @@ class faceTriangulation():
         """
 
         face1 = self.detect_face(img1)
-        time_face1 = time.time()
         face2 = self.detect_face(img2)
-        time_face2 = time.time()
-        print(f"Time delta beteween frames {time_face1 - time_face2}s")
+
 
         # rotation + translation matrix for camera 0 is identity.
         RT1 = np.concatenate([np.eye(3), [[0], [0], [0]]], axis=-1)
-        P1 = self.cameras[0].current_camera_matrix @ RT1  # projection matrix for C1
+        if self.cameras[0].fisheye:
+            P1 = self.cameras[0].current_camera_matrix @ RT1  # projection matrix for C1
+        else:
+            P1 = self.cameras[0].current_camera_matrix @ RT1  # projection matrix for C1
 
         # Rotation x translation matrix for camera 1 is the rotation and translation matrix obtained by
         # the stereo-calibration.
         RT2 = np.concatenate([self.rotation_matrix, self.translation_matrix], axis=-1)
-        P2 = self.cameras[1].current_camera_matrix @ RT2
+        if self.cameras[1].fisheye:
+            P2 = self.cameras[1].current_camera_matrix @ RT2
+        else:
+            P2 = self.cameras[1].current_camera_matrix @ RT2
 
         # Using the previous value for face1, face2 and face_coordinates, if no face was detected.
         try:
@@ -243,6 +268,7 @@ class faceTriangulation():
         return face1, face2
 
         # Function to compute the transformation matrix
+
     def compute_transform_matrix(self, points_A, points_B):
         """Calculates the transform matrix to transform any point of one coordinatesystem (3d) to another"""
         # Assuming points_A and points_B are numpy arrays with shape (N, 3)
@@ -288,14 +314,9 @@ class faceTriangulation():
 
         # Extract the transformed point in system B
         new_point = new_point_homogeneous[:3, :].T
-        print(new_point)
         return new_point[0]
 
-    def calibrate_display_center(self, rows=4, columns=5,
-                                 points=[(0.485, 0.03, 0.0375), (0.485, 0.055, 0.0375), (0.485, 0.08, 0.0375),
-                                         (0.485, 0.03, 0.0125), (0.485, 0.055, 0.0125), (0.485, 0.08, 0.0125),
-                                         (0.485, 0.03, -0.0125), (0.485, 0.055, -0.0125), (0.485, 0.08, -0.0125),
-                                         (0.485, 0.03, -0.0375), (0.485, 0.055, -0.0375), (0.485, 0.08, -0.0375)]):
+    def calibrate_display_center(self, rows=4, columns=5, points=[(0.485, 0.03, 0.0375), (0.485, 0.055, 0.0375), (0.485, 0.08, 0.0375), (0.485, 0.03, 0.0125), (0.485, 0.055, 0.0125), (0.485, 0.08, 0.0125),(0.485, 0.03, -0.0125), (0.485, 0.055, -0.0125), (0.485, 0.08, -0.0125),(0.485, 0.03, -0.0375), (0.485, 0.055, -0.0375), (0.485, 0.08, -0.0375)]):
         """
         Changes the coordinate system to a coordinate system based in the display center using the calibration device
         :param rows:
@@ -446,12 +467,18 @@ class faceTriangulation():
                             # storing the realworld / image-space coordinate pairs
                             # rotation + translation matrix for camera 0 is identity.
                             RT1 = np.concatenate([np.eye(3), [[0], [0], [0]]], axis=-1)
-                            P1 = self.cameras[0].optimized_camera_matrix @ RT1  # projection matrix for C1
+                            if self.cameras[0].fisheye:
+                                P1 = self.cameras[0].fisheye_optimized_camera_matrix @ RT1  # projection matrix for C1
+                            else:
+                                P1 = self.cameras[0].optimized_camera_matrix @ RT1  # projection matrix for C1
 
                             # Rotation x translation matrix for camera 1 is the rotation and translation matrix obtained by
                             # the stereo-calibration.
                             RT2 = np.concatenate([self.rotation_matrix, self.translation_matrix], axis=-1)
-                            P2 = self.cameras[1].optimized_camera_matrix @ RT2  # projection matrix for C1
+                            if self.cameras[1].fisheye:
+                                P2 = self.cameras[1].fisheye_optimized_camera_matrix @ RT2  # projection matrix for C1
+                            else:
+                                P2 = self.cameras[1].optimized_camera_matrix @ RT2  # projection matrix for C1
 
                             coordinates = []
                             # removing the scaling and adding the offset to get pixle coordinates in whole image
@@ -507,6 +534,7 @@ class faceTriangulation():
         ax.set_ylim([min(y_coords), max(y_coords)])
         ax.set_zlim([min(z_coords), max(z_coords)])
         ax.set_box_aspect([np.ptp(x_coords), np.ptp(y_coords), np.ptp(z_coords)])
+        cv2.destroyAllWindows()
         plt.show()
 
 
@@ -576,7 +604,7 @@ class spatialFacePosition(faceTriangulation):
 
         # Initializing the cameras
         self.cameras = [Camera(camera) for camera in self.cameras]
-        self.face_coordinates = [0,0,0]
+        self.face_coordinates = [1,0,0]
         self.face1 = [0, 0]
         self.face2 = [0, 0]
 
@@ -685,14 +713,20 @@ class spatialFacePosition(faceTriangulation):
                             RT1 = np.concatenate([np.eye(3), [[0], [0], [0]]], axis=-1)
                             #P1 = self.cameras[0].camera_matrix @ RT1  # projection matrix for C1
                             # Testing with undistorted images
-                            P1 = self.cameras[0].optimized_camera_matrix @ RT1  # projection matrix for C1
+                            if self.cameras[0].fisheye:
+                                P1 = self.cameras[0].fisheye_optimized_camera_matrix @ RT1  # projection matrix for C1
+                            else:
+                                P1 = self.cameras[0].optimized_camera_matrix @ RT1  # projection matrix for C1
 
                             # Rotation x translation matrix for camera 1 is the rotation and translation matrix obtained by
                             # the stereo-calibration.
                             RT2 = np.concatenate([self.rotation_matrix, self.translation_matrix], axis=-1)
                             #P2 = self.cameras[1].camera_matrix @ RT2
                             # Testing with undistorted images
-                            P2 = self.cameras[1].optimized_camera_matrix @ RT2  # projection matrix for C1
+                            if self.cameras[1].fisheye:
+                                P2 = self.cameras[1].fisheye_optimized_camera_matrix @ RT2  # projection matrix for C1
+                            else:
+                                P2 = self.cameras[1].optimized_camera_matrix @ RT2  # projection matrix for C1
 
                             coordinates = []
                             for c1, c2 in zip(corners1, corners2):
@@ -723,6 +757,7 @@ class spatialFacePosition(faceTriangulation):
         ax.set_ylim([min(y_coords), max(y_coords)])
         ax.set_zlim([min(z_coords), max(z_coords)])
         ax.set_box_aspect([np.ptp(x_coords), np.ptp(y_coords), np.ptp(z_coords)])
+        cv2.destroyAllWindows()
         plt.show()
 
     def __call__(self):
@@ -733,19 +768,19 @@ class spatialFacePosition(faceTriangulation):
         :return:    Success face_pos img1 (with face annotations) img2 (with face annotations)
         """
         #####! rewrite for an abitrary ammount of cameras!
-        sucess1, img1 = self.cameras[0].read()
-        sucess2, img2 = self.cameras[1].read()
-
+        #sucess1, img1 = self.cameras[0].read()
+        #sucess2, img2 = self.cameras[1].read()
+        try:
+            img1, img2 = self.read_cameras_synchronized()[:2]
+        except Exception as e:
+            print('Could not read both Cams', e)
+            return False
 
         img1 = self.cameras[0].undistort_image(img1)
         img2 = self.cameras[1].undistort_image(img2)
         self.cameras[0].current_camera_matrix = self.cameras[0].optimized_camera_matrix
         self.cameras[1].current_camera_matrix = self.cameras[1].optimized_camera_matrix
 
-
-        if not sucess2 or not sucess1:
-            print('Could not read both Cams')
-            return False
         # face1 and face2 are image coorinates of the face, the 3d face coordinates will be saved in self.face_coordinates
         face1, face2 = self.triangulate_face(img1, img2)
 

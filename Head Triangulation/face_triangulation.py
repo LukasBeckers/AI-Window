@@ -80,15 +80,17 @@ def normalize(vector):
 
 if __name__ == "__main__":
 
-    #configure_camera("Camera0_720", 0, [720, 1280])
-    #configure_camera("Camera1_720", 1, [720, 1280])
-    #configure_spatial_face_positon("Setup Aachen 1 720", ["Camera0_720", "Camera1_720"])
-    spatial_face_position = spatialFacePosition("Setup Aachen 1", face_detection=faceDetection())
+    configure_camera("Camera0_1080", stream=0, resolution=[1080, 1920])
+    configure_camera("Camera1_1080", stream=1, resolution=[1080, 1920])
+    configure_spatial_face_positon("Setup Aachen 1 1080", ["Camera0_1080", "Camera1_1080"])
+    spatial_face_position = spatialFacePosition("Setup Aachen 1 1080", face_detection=faceDetection())
 
-    #for i, camera in enumerate(spatial_face_position.cameras):
-        #print("Calibrating camera", camera, camera.fisheye)
-        #camera.fisheye_calibrate(rows=7, columns=9, n_images=10, scaling=0.025)
-        #camera.calibrate(scaling=0.025, n_images=10, rows=7, columns=9, fisheye=True)
+    for i, camera in enumerate(spatial_face_position.cameras[1:]):
+        continue
+        print("Fisheye Calibrating camera", camera, camera.fisheye, camera.resolution)
+        camera.fisheye_calibrate(rows=7, columns=9, n_images=10, scaling=0.025)
+        print("Normal Calibration")
+        camera.calibrate(scaling=0.025, n_images=10, rows=7, columns=9, fisheye=True)
 
     #spatial_face_position.stero_calibrate(scaling=0.025, n_images=5, rows=7, columns=9)
 
