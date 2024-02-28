@@ -53,6 +53,7 @@ class Camera():
         """
         if self.fisheye:
             img = self.undistort_fisheye(img)
+            return img
 
         img = cv2.undistort(img, self.camera_matrix, self.distortion, None, self.optimized_camera_matrix)
         return img
@@ -111,9 +112,9 @@ class Camera():
             with open('camera_configuration.json', 'r') as json_file:
                 configurations = json.load(json_file)
                 self.stream = configurations[self.name]["stream"]
-                try:   # Going with standard resolution 480 * 640.
+                try:
                     self.resolution  = configurations[self.name]["resolution"]
-                except KeyError:
+                except KeyError: # Going with standard resolution 480 * 640.
                     self.resolution = False
 
                 # trying to load attributes that are only added to the camera during calibration.
@@ -123,7 +124,7 @@ class Camera():
                     self.distortion = np.array(configurations[self.name]["distortion"])
                     self.optimized_camera_matrix = np.array(configurations[self.name]["optimized_camera_matrix"])
 
-                    self.current_camera_matrix = self.camera_matrix
+                    self.current_camera_matrix = self.optimized_camera_matrix  # gets overwritten if fisheye
                     self.calibrated = True
                 except KeyError as E:
                     print('Could not load all values', E)
@@ -139,9 +140,15 @@ class Camera():
                         self.fisheye_distortion = np.array(configurations[self.name]["fisheye_distortion"])
                         self.fisheye_optimized_camera_matrix = np.array(
                             configurations[self.name]["fisheye_optimized_camera_matrix"])
+
+                        self.current_camera_matrix = self.fisheye_optimized_camera_matrix
+                                                                                # if the camera is fisheye calibrated
+                                                                                # the current camera matrix is
+                                                                                # overwritten by the
+                        #                                                         fisheye_camera_matrix
                 except KeyError as E:
-                    if self. fisheye:
-                     print("Error while loading fisheye calibration, maybe camera was not fisheye calibrated", E)
+                    if self.fisheye:
+                     print("Error while loading fisheye calibration, maybe camera was not fisheye calibrated jet", E)
 
             return True
 
@@ -167,9 +174,10 @@ class Camera():
         :return:
         """
         assert n_images > 0, "n_images must be larger than zero!"
-        # performing fisheye_calibration first and on top of that the normal calibration
+        # performing fisheye_calibration first and on top of that the normal calibration.
         if fisheye:
             try:
+                # only performing fisheye calibration if it was not already fisheye calibrated before
                 _ = self.fisheye_optimized_camera_matrix
             except Exception:
                 self.fisheye_calibrate(rows=rows, columns=columns, n_images=n_images, scaling=scaling)
@@ -365,8 +373,7 @@ class Camera():
         dist = np.zeros((4, 1))
         rvecs = [np.zeros((1, 1, 3), dtype=np.float64) for _ in imgpoints]
         tvecs = [np.zeros((1, 1, 3), dtype=np.float64) for _ in imgpoints]
-        calibration_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC + cv2.fisheye.CALIB_CHECK_COND \
-                                + cv2.fisheye.CALIB_FIX_SKEW
+        calibration_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC   + cv2.fisheye.CALIB_FIX_SKEW
         rms, _, _, _, _ = \
             cv2.fisheye.calibrate(
                 np.expand_dims(np.asarray(objpoints), -2),
@@ -381,7 +388,7 @@ class Camera():
             )
 
         optimized_camera_matrix = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
-            mtx, dist, img.shape[:2][::-1], np.eye(3), balance=1)
+            mtx, dist, img.shape[:2][::-1], np.eye(3), balance=0.5)
 
 
         print('rmse:', ret)
@@ -395,9 +402,9 @@ class Camera():
         self.fisheye = True
 
         # Updating the camera_configuration.json file
-        self.set_config("fisheye_camera_matrix", self.camera_matrix)
-        self.set_config("fisheye_distortion", self.distortion)
-        self.set_config("fisheye_optimized_camera_matrix", self.optimized_camera_matrix)
+        self.set_config("fisheye_camera_matrix", self.fisheye_camera_matrix)
+        self.set_config("fisheye_distortion", self.fisheye_distortion)
+        self.set_config("fisheye_optimized_camera_matrix", self.fisheye_optimized_camera_matrix)
         self.set_config("fisheye", self.fisheye)
 
         # closing the window after calibration
