@@ -26,16 +26,22 @@ class Camera():
         if not self.load_configs():
             print(f"No camera-configuration for name: {name} found!")
         if self.resolution:
-            self.stream = cv2.VideoCapture(self.stream, cv2.CAP_DSHOW)
+            self.stream = cv2.VideoCapture(self.stream)
             self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[1])
             self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[0])
         else:
             self.stream = cv2.VideoCapture(self.stream)
 
-
+        #self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        #self.stream.set(cv2.CAP_PROP_FPS, 60)
 
     def read(self):
-        return self.stream.read()
+        output = self.stream.read()
+        if output[0]:
+            return output
+        else:
+            print(f'Could not read frame from camera {self.stream}!')
+            return output
 
     def __str__(self):
         return self.name
@@ -61,12 +67,19 @@ class Camera():
     def undistort_fisheye(self, img):
         h, w = img.shape[:2]
         dim = img.shape[:2][::-1]
-
-        map1, map2 = cv2.fisheye.initUndistortRectifyMap(self.fisheye_camera_matrix,
-                                                         self.fisheye_distortion, np.eye(3),
-                                                         self.fisheye_optimized_camera_matrix,
-                                                         [w, h],
-                                                         cv2.CV_16SC2)
+        # maybe I will put the distortion maps in the config files, but for now this quick and dirty fix will do.
+        # the maps are stored, because the initUndistortRectifyMap metod call takes about 0.22 seconds.
+        try:
+            map1 = self.fisheye_map1
+            map2 = self.fisheye_map2
+        except Exception:
+            map1, map2 = cv2.fisheye.initUndistortRectifyMap(self.fisheye_camera_matrix,
+                                                             self.fisheye_distortion, np.eye(3),
+                                                             self.fisheye_optimized_camera_matrix,
+                                                             [w, h],
+                                                             cv2.CV_16SC2)
+            self.fisheye_map1 = map1
+            self.fisheye_map2 = map2
         img = cv2.remap(img, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
         return img
 
@@ -412,3 +425,4 @@ class Camera():
         self.calibrated = True
 
 
+3
