@@ -95,7 +95,7 @@ if __name__ == "__main__":
     #spatial_face_position.stero_calibrate(scaling=0.025, n_images=5, rows=7, columns=9)
 
     #spatial_face_position.triangulate_checkerboard( )
-    #spatial_face_position.calibrate_display_center()
+    spatial_face_position.calibrate_display_center()
 
     if True:   # Displays the triangulation results.
         face_coordinates = []
@@ -122,7 +122,7 @@ if __name__ == "__main__":
             output_video_path = 'output_video.mp4'
             fps = 30.0  # Frames per second
             frame_size = frames[0].shape[:2][::-1]  # Specify the width and height of each frame
-            print("Frame Size", frame_size)
+
             # Define the codec and create a VideoWriter object
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # You can use other codecs like 'XVID', 'MJPG', etc.
             out = cv2.VideoWriter(output_video_path, fourcc, fps, frame_size)

@@ -1,13 +1,10 @@
-import cv2
-from cvzone.FaceMeshModule import FaceMeshDetector
-from multiprocessing import get_context, TimeoutError
-import numpy as np
-import time
-import os
+import threading
 import json
+import time
+
+import cv2
 from scipy import linalg
 from camera import Camera
-from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.pyplot as plt
 import subprocess
 from face_detection import *
@@ -231,10 +228,9 @@ class faceTriangulation():
         :param img1 & img2:  Rectified images from both cameras
         :return:
         """
-
-        face1 = self.detect_face(img1)
-        face2 = self.detect_face(img2)
-
+        # detection both faces in parallel
+        face1 = self.detect_face(img1, camera=0)
+        face2 = self.detect_face(img2, camera=1)
 
         # rotation + translation matrix for camera 0 is identity.
         RT1 = np.concatenate([np.eye(3), [[0], [0], [0]]], axis=-1)
@@ -253,9 +249,13 @@ class faceTriangulation():
 
         # Using the previous value for face1, face2 and face_coordinates, if no face was detected.
         try:
-            face_coordinates = self.DLT(P1, P2, face1, face2)
-        except IndexError:
-            face_coordinates = self.face_coordinates
+            # face_detection has to be finished before the triangulation
+            if face1 and face2:
+                face_coordinates = self.DLT(P1, P2, face1, face2)
+            else: # if one frame did not contain a face, the previous detections are returned
+                return self.face1, self.face2
+        except IndexError: # Index error occurs if no face was detected
+            return self.face1, self.face2
         self.face_coordinates = face_coordinates
         if len(face1) == 2:
             self.face1 = face1
@@ -608,6 +608,25 @@ class spatialFacePosition(faceTriangulation):
         self.face1 = [0, 0]
         self.face2 = [0, 0]
 
+        #Initially reading the cameras
+        current_frames = [None] * len(self.cameras)
+        def read_camera(camera_index):
+            camera = self.cameras[camera_index]
+            camera.stream.grab()
+            success, img =camera.stream.retrieve()
+            current_frames[camera_index] = (success, img)
+
+        camera_threads = []
+        for i in range(len(self.cameras)):
+            thread = threading.Thread(target=read_camera, args=(i, ))
+            camera_threads.append(thread)
+            thread.start()
+
+        for thread in camera_threads:
+            thread.join()
+        self.camera_threads = camera_threads
+        self.current_frames = current_frames
+
     def load_config(self):
         """
         If a configuration with the same name was already initialized, there will be a JSON file with
@@ -637,14 +656,14 @@ class spatialFacePosition(faceTriangulation):
             print("No configurations.json file found!")
             return False
 
-    def detect_face(self, img):
+    def detect_face(self, img, camera):
         """
         Detects faces in an img using the face_detection attribute and uses the face_handeler to select the correct
         face from all detected faces.
         :param img:         Image from a camera
         :return:            face_coordinates
         """
-        faces = self.face_detection(img)
+        faces = self.face_detection(img, camera)
         face = self.handle_faces(faces)
         return face
 
@@ -767,32 +786,112 @@ class spatialFacePosition(faceTriangulation):
 
         :return:    Success face_pos img1 (with face annotations) img2 (with face annotations)
         """
-        #####! rewrite for an abitrary ammount of cameras!
-        #sucess1, img1 = self.cameras[0].read()
-        #sucess2, img2 = self.cameras[1].read()
-        try:
-            img1, img2 = self.read_cameras_synchronized()[:2]
-        except Exception as e:
-            print('Could not read both Cams', e)
-            return False
+        call_time = time.time()
+        time_cam = time.time()
+        for thread in self.camera_threads:
+            thread.join()
+        success1, img1 = self.current_frames[0]
+        success2, img2 = self.current_frames[1]
 
-        img1 = self.cameras[0].undistort_image(img1)
-        img2 = self.cameras[1].undistort_image(img2)
-        self.cameras[0].current_camera_matrix = self.cameras[0].optimized_camera_matrix
-        self.cameras[1].current_camera_matrix = self.cameras[1].optimized_camera_matrix
+        # renewing the threads
+        def read_camera(camera_index):
+            #camera = self.cameras[camera_index]
+            #camera.stream.grab()
+            #success, img = camera.stream.retrieve()
+            #if success:
+            #    img = camera.undistort_image(img)
+            #self.current_frames[camera_index] = (success, img)
+            self.current_frames = [self.cameras[0].read(), self.cameras[1].read()]
 
-        # face1 and face2 are image coorinates of the face, the 3d face coordinates will be saved in self.face_coordinates
-        face1, face2 = self.triangulate_face(img1, img2)
+        self.camera_threads = []
+        for i in range(len(self.cameras[:1])):
+            thread = threading.Thread(target=read_camera, args=(i, ))
+            self.camera_threads.append(thread)
+            thread.start()
 
-        face_coordinates = self.face_coordinates
-        # convert to display coordinates if display_center_calibrated it transforms the face_coordinates for the coorinate
-        # system based in camera0 to a coordinate system based in the display center.
-        if self.display_center_calibrated:
-            face_coordinates = self.transform_point(face_coordinates, self.transform_matrix)
+        # If successfullly read frames, start processing
+        if success1 and success2:
+            self.cameras[0].current_camera_matrix = self.cameras[0].optimized_camera_matrix
+            self.cameras[1].current_camera_matrix = self.cameras[1].optimized_camera_matrix
 
-        return face_coordinates, img1, img2, face1, face2
+            tri_time = time.time()
+            # face1 and face2 are image coorinates of the face, the 3d face coordinates will be saved in self.face_coordinates
+            face1, face2 = self.triangulate_face(img1, img2)
+            tri_time = tri_time - time.time()
+
+            transform_time = time.time()
+            face_coordinates = self.face_coordinates
+
+            # convert to display coordinates if display_center_calibrated it transforms the face_coordinates for the coorinate
+            # system based in camera0 to a coordinate system based in the display center.
+            if self.display_center_calibrated:
+                face_coordinates = self.transform_point(face_coordinates, self.transform_matrix)
+            print(f"""
+            Time for whole call: {call_time - time.time()}, 
+            time for triangulation: {tri_time}, 
+            time for transformation: {time.time()-transform_time}""")
+            return face_coordinates, img1, img2, face1, face2
+        else:
+            self.camera_threads = []
+            for i in range(len(self.cameras)):
+                thread = threading.Thread(target=read_camera, args=(i,))
+                self.camera_threads.append(thread)
+                thread.start()
+            print(f'could not read all cameras')
+
 
 
 
 if __name__ == "__main__":
-    pass
+
+
+    import cProfile
+    import pstats
+
+    spf = spatialFacePosition(name='Setup Aachen 1 1080')
+
+    for i in range(10000):
+        x = spf()
+
+    def test_function():
+        """
+                if not self.load_configs():
+            print(f"No camera-configuration for name: {name} found!")
+        if self.resolution:
+            self.stream = cv2.VideoCapture(self.stream, cv2.CAP_DSHOW)
+            self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, self.resolution[1])
+            self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, self.resolution[0])
+        else:
+            self.stream = cv2.VideoCapture(self.stream)
+
+        self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+        self.stream.set(cv2.CAP_PROP_FPS, 60)
+        :return:
+        """
+        stream = cv2.VideoCapture(0)
+        stream.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        stream.set(cv2.CAP_PROP_FPS, 60)
+        stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        stream2 = cv2.VideoCapture(1)
+        stream2.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        stream2.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        stream2.set(cv2.CAP_PROP_FPS, 60)
+
+        average_t = 0
+        for x in range(20):
+
+            t = time.time()
+            ret, img = stream.read()
+            #ret, img2 = stream2.read()
+            if ret:
+                print('time for stream read:', time.time() - t, ret, img.shape)
+                if x > 2:
+                    average_t += (time.time() - t)
+            else:
+                print('could not read cam')
+        print('took on average', average_t/20)
+
+    #test_function()
+
+
