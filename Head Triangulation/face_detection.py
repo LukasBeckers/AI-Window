@@ -3,110 +3,149 @@ import dlib
 import mediapipe as mp
 import numpy as np
 import time
-from cvzone.FaceMeshModule import FaceMeshDetector
 
 
+class mpFaceDetector():
+    def __init__(self, model_selection, min_confidence):
+        self.detector = mp.solutions.face_detection.FaceDetection(model_selection=model_selection,
+                                                                  min_detection_confidence=min_confidence)
 
-class legacy_faceDetection():
-    """
-    Callable class that detects faces in images.
-    In this case the point between the eyes is used as the point location of the face.
+    def __call__(self, img, eye=None):
 
-    This can be done because cvzone detects FaceMeshes including eyes.
-    """
-    def __init__(self):
-        self.detector = FaceMeshDetector(maxFaces=1, staticMode=True, minDetectionCon=0.1)
-
-    def __call__(self, img):
-        img, faces = self.detector.findFaceMesh(img, draw=False)
-        # face landmarks 145 and 374 should be the right and the left eye. The position between these points is
-        # calculated directly
-        faces = [(np.array(face[145]) + np.array(face[374]))/2 for face in faces]
-        return faces
+        if eye is not None:
+            eye = {"right": [0],
+                   "left": [1],
+                   "middle": [0, 1]}[eye]
 
 
-class HaarrCascadeFaceDetection():
-    """
-    Callable class that detects faces in images.
-    In this version I use a Haar Cascade Classifier from open CV
+        img_height, img_width = img.shape[:2]
 
-    returns list of face coordinates (one coordinate per face)
-    [[342, 756], [...],...]
-    """
-    def __init__(self):
-        """ Check https://www.youtube.com/watch?v=j27xINvkMvM"""
-        self.face_detector = cv2.CascadeClassifier('haarcascade_frontalface_alt.xml')
-        self.scale_factor = 1.2
-        self.minNeighbors = 1
-        self.minSize = None
-        self.maxSize = None
+        predictions = self.detector.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-    def __call__(self, frame):
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
-        return self.face_detector.detectMultiScale(   frame,
-                                                      scaleFactor=self.scale_factor,
-                                                      minNeighbors=self.minNeighbors,
-                                                      minSize=self.minSize,
-                                                      maxSize=self.maxSize)
+        bounding_boxes = []
+        faces = []
+        eyes = []
 
-class hogfaceDetection():
-    """
-    Callable class that detects faces in images.
+        # Extracting results form the predictions
+        if predictions.detections:
+            for face in predictions.detections:
+                # !!! Faces are lists coded like [x_corner_of_cutout, y_corner_of_cutout, x_size_of_cutout, y_size_of_cutout]
+                box = [int(face.location_data.relative_bounding_box.xmin * img_width),
+                       int(face.location_data.relative_bounding_box.ymin * img_height),
+                       int(face.location_data.relative_bounding_box.width * img_width),
+                       int(face.location_data.relative_bounding_box.height * img_height)]
 
-    returns list of face coordinates (one coordinate per face)
-    [[342, 756], [...],...]
-    """
-    def __init__(self):
-        self.face_detector = dlib.get_frontal_face_detector()
+                bounding_boxes.append(box)
+                faces.append([box[0] + box[2]/2, box[1] + box[3]/2])
 
-    def __call__(self, frame):
-        face =  self.face_detector(frame)[0]
-        face = str(face)
-        face = face.split(' ')
+                # extracting the eye_position
+                if eye is not None:
+                    if len(eye) == 1:
+                        # Single eye
+                        eyes.append([face.location_data.relative_keypoints[eye[0]].x * img_width,
+                                                   face.location_data.relative_keypoints[eye[0]].y * img_height])
+                    else:
+                        # Not a single eye but the middle between both eyes
+                        x = [0, 0]
+                        for i in eye:
+                            x[0] += face.location_data.relative_keypoints[i].x * img_width
+                            x[1] += face.location_data.relative_keypoints[i].y * img_height
+                        x[0] /= len(eye)
+                        x[1] /= len(eye)
+                        eyes.append(x)
 
-        face = [[int(face[0].strip('[(,])')), int(face[1].strip('[(,])'))],
-                [int(face[2].strip('[(,])')), int(face[3].strip('[(,])'))]]
+        output = {
+            "faces": faces,
+        }
 
-        return face
+        if len(bounding_boxes) > 0:
+            output["bounding_boxes"] = bounding_boxes
+        if len(eyes) > 0:
+            output["eyes"] = eyes
+
+        return output
 
 class faceDetection():
 
     """
     Detects all faces in an Image and returns them as a list [[x,y], [x1, y1] ...]
 
-    This faceDetection version is based on BlazeFace from mediapipe
+    This faceDetection version is build modular and can use different Face detection algorithms, which have to be passed
+    as objects or functions to the faceDetection class during the __init__ call.
+
+    This class allows you to pass a default and a fast face-detection algorithm.
+    the thought behind this is, that the slow (but more sensitive)algorithm will be used on the full camera frame
+    to detect any face. If faces are detected, only the region of the detected face, which was used in the downstream
+    tasks (indces of faces to be tracked can be passed in the __call__ method) is analysed by the fast face-detection
+    algorithm in this call, reducing latency.
+
+    This face detection class also allows eye-detection based on the previous face-detection.
+    The eye detection algorithm should also be passed as object or function to the __init__ call
     """
-    def __init__(self, use_eye_detection=True):
+    def __init__(self, face_detector, face_detector_fast=None, eye_detector=None):
+        """
+        A face_detector or face_detector_fast object should be callable, take the following arguments:
+        'img' = input image or patch
+        'eye' = Some models also detect eyes while detecting faces, this param should indicate
+                which eye should be detected possible values are: "right", "left", "middle"
+                The detector must accept this argument, even if it doesn't do anything.
 
-        self.face_detector = mp.solutions.face_detection.FaceDetection(model_selection=1,
-                                                                       min_detection_confidence=0.1)
-        self.face_detector_fast = mp.solutions.face_detection.FaceDetection(model_selection=0,
-                                                                            min_detection_confidence=0.4)
-        self.use_eye_detection = use_eye_detection
-        self.previous_faces = {}
-        self.eye_detector = cv2.CascadeClassifier('haarcascade_eye.xml')
-        self.scale_factor = 1.2
-        self.minNeighbors = 1
-        self.minSize = None
-        self.maxSize = None
+        and it should return the results as a dict, results are allowed to be floats of pixel values:
+        following values are allowed in the returns:
+        {
+        "bounding_boxes": [[x_corner_of_bounding_box, y_corner_of_bounding_box,
+                            x_size_of_bounding_box, y_size_of_bounding_box],
+                            [x_corner_of_bounding_box2, ...], ...]
 
+        "faces":         [[x_position_of_face, y_position_of_face],
+                          [x_position_of_face2, ...], ..]
 
-    def _eye_detection(self, face_cutout, cutout_corner, eye):
+        "eyes":          [[x_position_of_eye, y_position_of_eye],
+                          [x_position_of_eye2, ...],...]
+
+        "eye_boxes"       [[x_corner_of_bounding_box, y_corner_of_bounding_box,
+                         x_size_of_bounding_box, y_size_of_bounding_box],
+                         [x_corner_of_bounding_box2, ...], ...]
+        }
+        "faces" is obligatory, all other results are optional.
+
+        the eye_detector should take as input:
+
+         "img", a cutout version of the face or a cutout_version of the "eye" previously
+        detected by the face_detection , the
+
+        "eye" parameter ["right", "left", "middle"] and a
+
+        "refinement" argument,
+        which indicates, that the algorithm should only refine the eye-position previously detected by the
+        face_detection_algorithm.
+
+        it should also return the results as a dict all result values are allowed to be floats of pixel values:
+
+        {
+        "eye": [x_position, y_position]
+        }
+
+        :param face_detector:      Default face-detection algorithm
+        :param face_detector_fast: Fast face-detection algorithm, for contineous tracting of a face (optional)
+        :param eye_detector:       Algorithm for eye-detection (optional)
+
+        """
+        self.face_detector = face_detector
+        self.face_detector_fast = face_detector_fast
+        self.eye_detector = eye_detector
+
+        # stores bounding-box values of previous __call__ predictions
+        self.previous_bounding_boxes = {}
+        self.previous_eye_position_in_relation_to_bounding_box = {}
+
+    def _eye_detection(self, face_cutout, cutout_corner, eye, i):
         """raises Error if no Eye is detected, this error will be caught in the call method.
             eye is either right, left or middle
         """
-        if self.use_eye_detection:
-            # To do cut out eye region before eye detection
-            eye_detection_time = time.time()
-            gray_cutout = cv2.cvtColor(face_cutout, cv2.COLOR_BGR2GRAY)
-        
-            faces = self.eye_detector.detectMultiScale(gray_cutout)[0]
-            print('faces', faces, time.time() - eye_detection_time)
-            return [faces[0] + int(faces[2]/2) + cutout_corner[0], faces[1] + int(faces[2]/2) + cutout_corner[1]]
-        else:
-            raise Exception("No Eye detected!")
+        raise Exception("No Eye detected!")
 
-    def _approximate_eye(self, face_cutout, cutout_corner, eye):
+    def _approximate_eye(self, face_cutout, cutout_corner, eye, i):
         """
         Fallback if _eye_detection does not succeed. It just estimates the eye position on average values.
         :param face_cutout:
@@ -114,9 +153,9 @@ class faceDetection():
         """
         cutout_height, cutout_width = face_cutout.shape[:2]
 
-        return [int(cutout_height/2) + cutout_corner[0], int(cutout_width/2) + cutout_corner[1]]
+        return
 
-    def _create_face_patches(self, previous_face_regions, increase=2, min_res=[128, 128], img=None):
+    def _create_face_patches(self, previous_face_regions, increase=2, min_res=[128, 128]):
         """
         :param previous_face_regions:   Regions in which in the previous call Faces were detected
         :param increase:                Faktor by which the size of the original face regions is increased
@@ -124,10 +163,9 @@ class faceDetection():
                                         be undercut for the face cutouts
         :return:                        Image cutout landmarks
         """
+
         face_centers = [[int(face_coords[2]/2) + face_coords[0], int(face_coords[3]/2) + face_coords[1]]
                         for face_coords in previous_face_regions]
-
-        img_copy = np.array(img)
         side_relation_min_res = min_res[0] / min_res[1]
 
         cutout_resolutions = [[int(x*increase), int(y * increase)] for _,_, x, y in previous_face_regions]
@@ -144,96 +182,118 @@ class faceDetection():
 
         return  cutout_landmarks
 
-
-    def __call__(self, img, camera=0, eye="right"):
-        """
-
-        :param img:
-        :param eye:  "right", "left", or "middle"
-        :param camera: indice which camera the image is from (important for roi detection)
-        :return:
-        """
-        assert eye in ["right", "left", "middle"], "eye has to be 'right', 'left' or 'middle'"
-        # loading previous face_positions
-        try:
-            previous_faces = self.previous_faces[camera]
-        except KeyError: # No image from camera processed yet
-            previous_faces = []
-
-
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    def _patch_prediction(self, img, eye, camera, tracked_faces):
         img_height, img_width = img.shape[:2]
-        if len(previous_faces) == 0: # No previous face detection, using slow but accurate detection on whole image
-            faces = self.face_detector.process(img)
-            if faces.detections:
-                faces_detected = True
-            else:
-                faces_detected = False
 
+        # sorting the previous bounding boxes
+        if tracked_faces is not None:
+            previous_bounding_boxes = [box for i, box in enumerate(self.previous_bounding_boxes[camera]) if i in
+                                       tracked_faces]
+        else:
+            previous_bounding_boxes = self.previous_bounding_boxes
 
-            if faces_detected:
-                # !!! Faces are lists coded like [x_corner_of_cutout, y_corner_of_cutout, x_size_of_cutout, y_size_of_cutout]
-                faces = [[   int(face.location_data.relative_bounding_box.xmin*img_width),
-                             int(face.location_data.relative_bounding_box.ymin*img_height),
-                             int(face.location_data.relative_bounding_box.width*img_width),
-                             int(face.location_data.relative_bounding_box.height*img_height)] for face
-                                                                                                    in faces.detections]
+        # creating face_patches
+        bounding_box_landmarks = self._create_face_patches(previous_bounding_boxes)
+        bounding_box_offsets = [[x, y] for x, y, _, _ in bounding_box_landmarks]
+        face_patches = [img[lm[1]:(lm[1] + lm[2]), lm[0]: (lm[0] + lm[3])] for lm in bounding_box_landmarks]
 
-                # setting the previous faces for the next call
-                self.previous_faces[camera] = faces
+        # predicting and combining the predictions of all patches
+        predictions = [self.face_detector_fast(patch, eye) for patch in face_patches]
 
-                # trying to detect eyes:
-                eyes = []
-                for i, face in enumerate(faces):
-                    cutout_corner = face[:2]
-                    face_cutout = img[face[1]:(face[1] + face[2]), face[0]: face[0] + face[3]]
+        # merging the predictions of all patches and applying the offsets.
+        merged_predictions = {}
+        for pred, (x_offset, y_offset) in zip(predictions, bounding_box_offsets):
+            for key, value in  pred.items():
+                # applying the offsets to convert from patch pixel-values to img_pixel values
+                value_new = []
+                for v in value:
+                    v[0] += x_offset
+                    v[1] += y_offset
+                    value_new.append(v)
+                value = value_new
+                #adding to the merged predictions
+                if key in merged_predictions:
+                    merged_predictions[key] += value
+                else:
+                    merged_predictions[key] = value
+        predictions = merged_predictions
 
-                    try:
-                        eyes.append(self._eye_detection(face_cutout, cutout_corner, eye))
-                    except Exception:
-                        eyes.append(self._approximate_eye(face_cutout, cutout_corner, eye))
+        # setting the previous bounding_boxes for the next call
+        if "bounding_boxes" in predictions.keys():
+            self.previous_bounding_boxes[camera] = predictions["bounding_boxes"]
+        else:
+            # resetting the previous bounding_boxes for next function call
+            self.previous_bounding_boxes[camera] = []
 
-                return eyes
+        return predictions
 
-            else:
-                # resetting the previous faces for next function call
-                self.previous_faces[camera] = []
-                return []
+    def _fullframe_prediction(self, img, eye, camera):
+        predictions = self.face_detector(img, eye)
 
+        # setting the previous bounding_boxes for the next call
+        if "bounding_boxes" in predictions.keys():
+            self.previous_bounding_boxes[camera] = predictions["bounding_boxes"]
+        else:
+            # resetting the previous bounding_boxes for next function call
+            self.previous_bounding_boxes[camera] = []
+
+        return predictions
+
+    def __call__(self, img, camera=0, tracked_faces=None, eye=None, refinement=None):
+        """
+
+        :param img:         Image from camera-read.
+        :param camera:      Index which camera the image is from (important for roi detection)
+        :param eye:         If either the face-detection algorithm can detect eyes or a separate eye-detection
+                            algorithm is passed, this parameter indicates which eye should be tracked:
+                            "right", "left", "middle"
+        :param refinement:  Indicates, if the eye-position should be predicted from a face cut out or if the
+                            eye-position should just be refined based on a cutout of the eye_which is tracked.
+                            either True, False or None, None uses refine_ment, if the face_detection algorithm returns
+                            an "eye_box
+        :param tracked_faces: List of indices of faces from last prediction which should be tracked in this prediction,
+                              None tracks all faces.
+
+        :return:    List of face/eye pixel-positions (float)
+
+        """
+
+        assert eye in ["right", "left", "middle", None], "eye has to be 'right', 'left', 'middle' or None"
+
+        # loading previous face_positions based on the camera-index
+        try:
+            previous_bounding_boxes = self.previous_bounding_boxes[camera]
+        except KeyError: # No image from this camera processed yet
+            previous_bounding_boxes = []
+
+        # Full frame prediction using slow_detector
+        if len(previous_bounding_boxes) == 0 or self.face_detector_fast is None:
+            predictions = self._fullframe_prediction(img, eye, camera)
         # Faster Face detection algorithm on face patches based on previous face detections
         else:
-            # creating face_patches
-            face_cutout_landmarks = self._create_face_patches(previous_faces, img=img)
+            predictions = self._patch_prediction(img, eye, camera, tracked_faces)
 
-            face_offsets = [[x, y] for x, y,_, _ in face_cutout_landmarks]
-            face_patches = [img[lm[1]:(lm[1] + lm[2]), lm[0]: (lm[0] + lm[3])] for lm in face_cutout_landmarks]
-            predictions = [self.face_detector_fast.process(patch) for patch in face_patches]
 
-            # Extracting the face bounding box values from the predictions
-            faces = []
-            for prediction, patch, (x_offset, y_offset) in zip(predictions, face_patches, face_offsets):
-                patch_width, patch_height = patch.shape[:2]
-                if prediction.detections:
-                    for face in prediction.detections:
-                        faces.append([int(x_offset + face.location_data.relative_bounding_box.xmin*patch_width),
-                                      int(y_offset + face.location_data.relative_bounding_box.ymin*patch_height),
-                                      int(face.location_data.relative_bounding_box.width*patch_width),
-                                      int(face.location_data.relative_bounding_box.height*patch_height)])
-            # setting the previous_faces for the new call
-            self.previous_faces[camera] = faces
-
+        """
+        if self.eye_detector is not None:
             # trying to detect eyes:
             eyes = []
             for i, face in enumerate(faces):
                 cutout_corner = face[:2]
                 face_cutout = img[face[1]:(face[1] + face[2]), face[0]: face[0] + face[3]]
-
+    
                 try:
-                    eyes.append(self._eye_detection(face_cutout, cutout_corner, eye))
+                    eyes.append(self._eye_detection(face_cutout, cutout_corner, eye, i))
                 except Exception as e:
                     print("Eye Detection failed, falling back to eye guessing", e)
-                    eyes.append(self._approximate_eye(face_cutout, cutout_corner, eye))
-            return eyes
+                    eyes.append(self._approximate_eye(face_cutout, cutout_corner, eye, i))
+                return eyes
+        """
+
+        if "eyes" in predictions.keys():
+            return predictions["eyes"]
+        else:
+            return predictions["faces"]
 
 
 class checkerboardDetection():
@@ -297,27 +357,24 @@ if __name__=="__main__":
     stream = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     stream.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    fd = faceDetection()
+    fd = faceDetection(face_detector=mpFaceDetector(model_selection=1, min_confidence=0.1),
+                       face_detector_fast=mpFaceDetector(model_selection=0, min_confidence=0.4))
 
     while True:
         start_time = time.time()
         frame = stream.read()[1]
-        print(f'Time for frame_read {time.time()-start_time}')
+        #print(f'Time for frame_read {time.time()-start_time}')
 
         face_detection_time = time.time()
-        try:
-            faces = fd(frame)
-        except Exception as E:
-            print('Face_detection failed', E)
-            continue
 
-        print(f'Time for face_detection{time.time()-face_detection_time}')
+        faces = fd(frame, eye="middle", tracked_faces=[0])
+        #print(f'Time for face_detection{time.time()-face_detection_time}')
         if len(faces) > 0:
             face_detected = True
             for face in faces:
-                print('face in final loop', face)
+                #print('face in final loop', face)
                 last_face_pos  = face
-                cv2.circle(frame, (face[0], face[1]), radius=10, color=(0, 0, 0), thickness=10)
+                cv2.circle(frame, (int(face[0]), int(face[1])), radius=10, color=(0, 0, 0), thickness=10)
             cv2.imshow('frame', frame)
             cv2.waitKey(1)
 
