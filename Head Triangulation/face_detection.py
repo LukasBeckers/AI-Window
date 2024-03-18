@@ -6,9 +6,10 @@ import time
 
 
 class mpFaceDetector():
-    def __init__(self, model_selection, min_confidence):
+    def __init__(self, model_selection, min_confidence, eye_box_relative_size=0.4):
         self.detector = mp.solutions.face_detection.FaceDetection(model_selection=model_selection,
                                                                   min_detection_confidence=min_confidence)
+        self.box_size = eye_box_relative_size
 
     def __call__(self, img, eye=None):
 
@@ -25,7 +26,7 @@ class mpFaceDetector():
         bounding_boxes = []
         faces = []
         eyes = []
-
+        eye_boxes = []
         # Extracting results form the predictions
         if predictions.detections:
             for face in predictions.detections:
@@ -42,8 +43,17 @@ class mpFaceDetector():
                 if eye is not None:
                     if len(eye) == 1:
                         # Single eye
-                        eyes.append([face.location_data.relative_keypoints[eye[0]].x * img_width,
-                                                   face.location_data.relative_keypoints[eye[0]].y * img_height])
+                        eye_position = [face.location_data.relative_keypoints[eye[0]].x * img_width,
+                                                   face.location_data.relative_keypoints[eye[0]].y * img_height]
+                        eyes.append(eye_position)
+
+                        # Generating Eye-boxes for further eye-position refinement
+                        eye_box_shape = [box[2] * self.box_size, box[3] * self.box_size]
+                        eye_box_corner = [int(eye_position[0] - eye_box_shape[0]/2),
+                                          int(eye_position[1]-eye_box_shape[1]/2)]
+                        eye_box_corner.extend([int(x) for x in eye_box_shape])
+                        eye_box = eye_box_corner
+                        eye_boxes.append(eye_box)
                     else:
                         # Not a single eye but the middle between both eyes
                         x = [0, 0]
@@ -62,6 +72,8 @@ class mpFaceDetector():
             output["bounding_boxes"] = bounding_boxes
         if len(eyes) > 0:
             output["eyes"] = eyes
+        if len(eye_boxes) > 0:
+            output["eye_boxes"] = eye_boxes
 
         return output
 
@@ -108,6 +120,8 @@ class faceDetection():
                          [x_corner_of_bounding_box2, ...], ...]
         }
         "faces" is obligatory, all other results are optional.
+        the "eye_boxes" coordinates should be in relation to the passed full-frame or patch pixel-coordinates,
+        not the newly detected face_bounding_box.
 
         the eye_detector should take as input:
 
@@ -139,21 +153,28 @@ class faceDetection():
         self.previous_bounding_boxes = {}
         self.previous_eye_position_in_relation_to_bounding_box = {}
 
-    def _eye_detection(self, face_cutout, cutout_corner, eye, i):
+    def _eye_detection(self, img, predictions, eye):
         """raises Error if no Eye is detected, this error will be caught in the call method.
             eye is either right, left or middle
         """
-        raise Exception("No Eye detected!")
+        return predictions
 
-    def _approximate_eye(self, face_cutout, cutout_corner, eye, i):
+    def _approximate_eyes(self, predictions, camera):
         """
         Fallback if _eye_detection does not succeed. It just estimates the eye position on average values.
         :param face_cutout:
         :return:
         """
-        cutout_height, cutout_width = face_cutout.shape[:2]
 
-        return
+        return predictions
+    def _refine_eyes(self, img, predictions):
+        for eye_box in predictions['eye_boxes']:
+            eye_cutout = img[eye_box[1]:(eye_box[1] + eye_box[2]), eye_box[0]: (eye_box[0] + eye_box[3])]
+            eye_cutout = cv2.resize(eye_cutout, [eye_cutout.shape[0] * 10, eye_cutout.shape[1] * 10])
+            cv2.imshow('eye_cutout', eye_cutout)
+            cv2.waitKey(1)
+
+        return predictions
 
     def _create_face_patches(self, previous_face_regions, increase=2, min_res=[128, 128]):
         """
@@ -169,7 +190,7 @@ class faceDetection():
         side_relation_min_res = min_res[0] / min_res[1]
 
         cutout_resolutions = [[int(x*increase), int(y * increase)] for _,_, x, y in previous_face_regions]
-        # replacing small cutout resolutions wiht the min_res
+        # replacing small cutout resolutions with the min_res
         cutout_resolutions = [res if res[0] > min_res[0] or res[1] > min_res[1] else min_res
                               for res in cutout_resolutions]
         # checking if side_relation of cutout_resolutions is correct
@@ -179,18 +200,15 @@ class faceDetection():
         # creating the cutout coordinates in the format of the face_predictions
         cutout_landmarks = [[int(abs(center[0] - res[0]/2)), int(abs(center[1] - res[1]/2)), int(abs(res[0])), int(abs(res[1]))]
                             for center, res in zip(face_centers, cutout_resolutions)]
-
         return  cutout_landmarks
 
     def _patch_prediction(self, img, eye, camera, tracked_faces):
-        img_height, img_width = img.shape[:2]
-
         # sorting the previous bounding boxes
         if tracked_faces is not None:
             previous_bounding_boxes = [box for i, box in enumerate(self.previous_bounding_boxes[camera]) if i in
                                        tracked_faces]
         else:
-            previous_bounding_boxes = self.previous_bounding_boxes
+            previous_bounding_boxes = self.previous_bounding_boxes[camera]
 
         # creating face_patches
         bounding_box_landmarks = self._create_face_patches(previous_bounding_boxes)
@@ -249,8 +267,7 @@ class faceDetection():
                             "right", "left", "middle"
         :param refinement:  Indicates, if the eye-position should be predicted from a face cut out or if the
                             eye-position should just be refined based on a cutout of the eye_which is tracked.
-                            either True, False or None, None uses refine_ment, if the face_detection algorithm returns
-                            an "eye_box
+                            either True, False the if the face_detection algorithm returns an "eye_boxes"
         :param tracked_faces: List of indices of faces from last prediction which should be tracked in this prediction,
                               None tracks all faces.
 
@@ -273,22 +290,18 @@ class faceDetection():
         else:
             predictions = self._patch_prediction(img, eye, camera, tracked_faces)
 
-
-        """
+        # Detecting or refining eye-position
         if self.eye_detector is not None:
-            # trying to detect eyes:
-            eyes = []
-            for i, face in enumerate(faces):
-                cutout_corner = face[:2]
-                face_cutout = img[face[1]:(face[1] + face[2]), face[0]: face[0] + face[3]]
-    
-                try:
-                    eyes.append(self._eye_detection(face_cutout, cutout_corner, eye, i))
-                except Exception as e:
-                    print("Eye Detection failed, falling back to eye guessing", e)
-                    eyes.append(self._approximate_eye(face_cutout, cutout_corner, eye, i))
-                return eyes
-        """
+            try:
+                # Possible refinement branch
+                if "eye_boxes" in predictions.keys():
+                    predictions = self._refine_eyes(img, predictions)
+                # Eye localization from face-patch
+                elif "bounding_boxes" in predictions.keys():
+                    predictions = self._eye_detection(img, predictions, eye)
+            except Exception as exception:
+                print("Eye detection or refinement failed, falling back to eye-estimation", exception)
+                predictions = self._approximate_eyes(predictions, camera)
 
         if "eyes" in predictions.keys():
             return predictions["eyes"]
@@ -355,28 +368,33 @@ if __name__=="__main__":
     search_increase = 0.2
 
     stream = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    stream.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    #stream.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    #stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
     fd = faceDetection(face_detector=mpFaceDetector(model_selection=1, min_confidence=0.1),
-                       face_detector_fast=mpFaceDetector(model_selection=0, min_confidence=0.4))
+                       face_detector_fast=mpFaceDetector(model_selection=0, min_confidence=0.4),
+                       eye_detector=1)
 
     while True:
         start_time = time.time()
         frame = stream.read()[1]
-        #print(f'Time for frame_read {time.time()-start_time}')
+        print(frame.shape)
+        print(f'Time for frame_read {time.time()-start_time}')
 
         face_detection_time = time.time()
 
-        faces = fd(frame, eye="middle", tracked_faces=[0])
-        #print(f'Time for face_detection{time.time()-face_detection_time}')
+        faces = fd(frame, eye="right", tracked_faces=[0])
+        print(f'Time for face_detection{time.time()-face_detection_time}')
         if len(faces) > 0:
             face_detected = True
             for face in faces:
-                #print('face in final loop', face)
+                print('face in final loop', face)
                 last_face_pos  = face
-                cv2.circle(frame, (int(face[0]), int(face[1])), radius=10, color=(0, 0, 0), thickness=10)
+                cv2.circle(frame, (int(face[0]), int(face[1])), radius=1, color=(0, 0, 0), thickness=30)
+            frame = cv2.resize(frame, (1280, 960))
             cv2.imshow('frame', frame)
             cv2.waitKey(1)
 
         else:
-            face_detected = False
+            frame = cv2.resize(frame, (1280, 960))
+            cv2.imshow('frame', frame)
+            cv2.waitKey(1)
