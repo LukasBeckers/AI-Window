@@ -90,7 +90,6 @@ class faceDetection():
         self.previous_faces = {}
         self.eye_estimates = []
 
-
     def _eye_detection(self, face_cutout, cutout_corner, eye, i):
         """raises Error if no Eye is detected, this error will be caught in the call method.
             eye is either right, left or middle

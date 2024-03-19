@@ -77,6 +77,36 @@ class mpFaceDetector():
 
         return output
 
+class eyeRefiner():
+    """
+    This class refines the position of an eye within a cutout of a face centered arround the eye (pre selection from
+    other model)
+    """
+    def __init__(self):
+        self.detector = cv2.CascadeClassifier('haarcascade_eye.xml')
+
+    def __call__(self, img, predictions):
+        """
+        This __call__ method will use the "eye_boxes" saved in predictions, to create cutouts of the img (cv2.image)
+        and predict the position of the eye in it. the position of the eye in pixel coordinates in relation to the
+        whole image will be saved in the predictions under "eyes". The predictions will also be returned.
+
+        :return: updated predictions
+        """
+        refined_eye_positions = []
+        for i, eye_box in enumerate(predictions['eye_boxes']):
+            try:
+                img =  cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                eye_cutout = img[eye_box[1]:(eye_box[1] + eye_box[2]), eye_box[0]: (eye_box[0] + eye_box[3])]
+                eye_pred = self.detector.detectMultiScale(eye_cutout, 1.3, 4)[0]  # [0] because we expect only one eye
+                eye_pred = [eye_box[0] + eye_pred[0] + eye_pred[2] / 2, eye_box[1] + eye_pred[1] + eye_pred[3] / 2]
+                refined_eye_positions.append(eye_pred)
+            except Exception: # if eye_detection fails the unrefined eye_position is used
+                refined_eye_positions.append(predictions["eyes"][i])
+
+        predictions["eyes"] = refined_eye_positions
+        return predictions
+
 class faceDetection():
 
     """
@@ -168,11 +198,8 @@ class faceDetection():
 
         return predictions
     def _refine_eyes(self, img, predictions):
-        for eye_box in predictions['eye_boxes']:
-            eye_cutout = img[eye_box[1]:(eye_box[1] + eye_box[2]), eye_box[0]: (eye_box[0] + eye_box[3])]
-            eye_cutout = cv2.resize(eye_cutout, [eye_cutout.shape[0] * 10, eye_cutout.shape[1] * 10])
-            cv2.imshow('eye_cutout', eye_cutout)
-            cv2.waitKey(1)
+
+        predictions = self.eye_detector(img, predictions)
 
         return predictions
 
@@ -257,7 +284,7 @@ class faceDetection():
 
         return predictions
 
-    def __call__(self, img, camera=0, tracked_faces=None, eye=None, refinement=None):
+    def __call__(self, img, camera=0, tracked_faces=None, eye=None, refinement=True):
         """
 
         :param img:         Image from camera-read.
@@ -294,7 +321,7 @@ class faceDetection():
         if self.eye_detector is not None:
             try:
                 # Possible refinement branch
-                if "eye_boxes" in predictions.keys():
+                if "eye_boxes" in predictions.keys() and refinement:
                     predictions = self._refine_eyes(img, predictions)
                 # Eye localization from face-patch
                 elif "bounding_boxes" in predictions.keys():
@@ -360,28 +387,21 @@ class faceHandeler():
         return faces
 
 
-
 if __name__=="__main__":
 
-    face_detected = False
-    last_face_pos = []
-    search_increase = 0.2
-
     stream = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    #stream.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    #stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+    stream.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
     fd = faceDetection(face_detector=mpFaceDetector(model_selection=1, min_confidence=0.1),
                        face_detector_fast=mpFaceDetector(model_selection=0, min_confidence=0.4),
-                       eye_detector=1)
+                       eye_detector=eyeRefiner())
 
     while True:
         start_time = time.time()
         frame = stream.read()[1]
-        print(frame.shape)
+
         print(f'Time for frame_read {time.time()-start_time}')
-
         face_detection_time = time.time()
-
         faces = fd(frame, eye="right", tracked_faces=[0])
         print(f'Time for face_detection{time.time()-face_detection_time}')
         if len(faces) > 0:
@@ -389,7 +409,7 @@ if __name__=="__main__":
             for face in faces:
                 print('face in final loop', face)
                 last_face_pos  = face
-                cv2.circle(frame, (int(face[0]), int(face[1])), radius=1, color=(0, 0, 0), thickness=30)
+                cv2.circle(frame, (int(face[0]), int(face[1])), radius=1, color=(5, 0, 255), thickness=10)
             frame = cv2.resize(frame, (1280, 960))
             cv2.imshow('frame', frame)
             cv2.waitKey(1)
